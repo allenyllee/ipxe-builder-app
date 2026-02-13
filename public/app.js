@@ -1,8 +1,9 @@
 const el = {
   apiBase: document.getElementById('apiBase'),
-  startBtn: document.getElementById('startBtn'),
   loginBtn: document.getElementById('loginBtn'),
+  switchInstallBtn: document.getElementById('switchInstallBtn'),
   logoutBtn: document.getElementById('logoutBtn'),
+  clearCacheBtn: document.getElementById('clearCacheBtn'),
   userInfo: document.getElementById('userInfo'),
   templateInfo: document.getElementById('templateInfo'),
   setupTips: document.getElementById('setupTips'),
@@ -30,7 +31,11 @@ let lastArtifactRunId = null;
 let templateConfig = null;
 let setupWizardRunning = false;
 let setupWizardAbort = false;
-let setupPreAuthStep = 0;
+let oauthInstallations = [];
+let oauthInstallationsError = '';
+let oauthAuthorized = false;
+let oauthUserLogin = '';
+let oauthForkExists = false;
 
 function appendLog(msg) {
   const ts = new Date().toISOString().replace('T', ' ').replace('Z', '');
@@ -76,6 +81,11 @@ function getCachedInstallationId() {
 
 function clearCachedInstallationId() {
   localStorage.removeItem(INSTALLATION_CACHE_KEY);
+}
+
+function clearAllLocalCache() {
+  localStorage.removeItem(STORAGE_KEY);
+  clearCachedInstallationId();
 }
 
 function restoreConfig() {
@@ -128,6 +138,20 @@ async function apiRequest(path, init = {}) {
   return res;
 }
 
+async function rawApiRequest(path, init = {}) {
+  const base = apiBase();
+  if (!base) throw new Error('Worker API Base URL 尚未設定。');
+  const res = await fetch(`${base}${path}`, {
+    ...init,
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(init.headers || {}),
+    },
+  });
+  return res;
+}
+
 async function apiRequestWithRetry(path, init = {}, attempts = 3, delayMs = 500) {
   let lastErr;
   for (let i = 1; i <= attempts; i += 1) {
@@ -162,6 +186,10 @@ function getForkUrl() {
 
 function getInstallUrl() {
   return `${apiBase()}/api/auth/login`;
+}
+
+function getOAuthLoginUrl() {
+  return `${apiBase()}/api/oauth/login`;
 }
 
 function showSetupTips(reason = '', extraLinks = []) {
@@ -215,8 +243,10 @@ function setOverlay(statusText, actions = []) {
     const a = document.createElement('a');
     a.className = `status-link ${action.secondary ? 'secondary' : ''}`.trim();
     a.href = action.href;
-    a.target = '_blank';
-    a.rel = 'noopener noreferrer';
+    if (!action.sameTab) {
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+    }
     a.textContent = action.label;
     el.setupOverlayActions.appendChild(a);
   }
@@ -224,8 +254,9 @@ function setOverlay(statusText, actions = []) {
 
 function clearPostInstallFlagFromUrl() {
   const params = new URLSearchParams(window.location.search);
-  if (!params.has('post_install')) return;
+  if (!params.has('post_install') && !params.has('oauth_done')) return;
   params.delete('post_install');
+  params.delete('oauth_done');
   const nextUrl = `${window.location.pathname}${params.toString() ? `?${params.toString()}` : ''}${window.location.hash}`;
   window.history.replaceState({}, '', nextUrl);
 }
@@ -244,11 +275,15 @@ async function tryApi(path, init = {}) {
   }
 }
 
-async function runSetupWizard({ autoOpenInstall = false } = {}) {
+async function runSetupWizard() {
   if (setupWizardRunning) return;
   setupWizardRunning = true;
   setupWizardAbort = false;
-  setupPreAuthStep = 0;
+  oauthInstallations = [];
+  oauthInstallationsError = '';
+  oauthAuthorized = false;
+  oauthUserLogin = '';
+  oauthForkExists = false;
   setOverlayVisible(true);
 
   const installUrl = getInstallUrl();
@@ -266,53 +301,71 @@ async function runSetupWizard({ autoOpenInstall = false } = {}) {
         break;
       }
 
-      const forkUrl = getForkUrl();
-      const is401 = isUnauthorizedError(me.err);
-      if (is401 && setupPreAuthStep === 0) {
-        setOverlay('Step 1/2: 先 fork Template Repo。完成後按「下一步」。', [
-          ...(forkUrl ? [{ label: '前往 Fork 頁', href: forkUrl, secondary: true }] : []),
-          {
-            type: 'button',
-            label: '我已完成 Fork，下一步',
-            onClick: () => {
-              setupPreAuthStep = 1;
-            },
-          },
+      await loadOauthInstallations({ silent: true });
+      if (!oauthAuthorized) {
+        setOverlay('Step 1/4: 先完成 OAuth 使用者登入。登入後會自動回到此頁繼續檢查。', [
+          { label: 'OAuth 使用者登入', href: getOAuthLoginUrl(), sameTab: true },
         ]);
-        await sleep(1000);
+        await sleep(1500);
         continue;
       }
 
-      if (is401 && setupPreAuthStep === 1) {
-        setOverlay('Step 2/2: 安裝 GitHub App 到你的 fork repo。完成後會自動繼續。', [
-          { label: '前往 GitHub App Install', href: installUrl },
+      if (oauthInstallations.length > 0) {
+        const actions = [
           {
             type: 'button',
-            label: '已安裝但沒回來？快速恢復登入',
+            label: '重新整理安裝清單',
             secondary: true,
             onClick: async () => {
-              const ok = await tryResumeFromCachedInstallation();
-              if (!ok) appendLog('快速恢復失敗：找不到可用安裝快取，請重新安裝一次。');
+              await loadOauthInstallations();
             },
           },
-        ]);
-        await sleep(3000);
+          { label: '前往 GitHub App Install', href: installUrl, sameTab: true },
+        ];
+        for (const inst of oauthInstallations) {
+          actions.push({
+            type: 'button',
+            label: `使用 #${inst.installation_id} (${inst.account_login})`,
+            onClick: async () => {
+              const ok = await resumeWithInstallationId(inst.installation_id);
+              if (!ok) appendLog(`installation #${inst.installation_id} 恢復失敗。`);
+            },
+          });
+        }
+        setOverlay('Step 2/4: 已找到 installations，請選擇一個恢復登入；若都不合適可改走 App Install。', actions);
+        await sleep(2000);
         continue;
       }
 
-      setOverlay(`等待登入狀態可用：${me.err instanceof Error ? me.err.message : String(me.err)}`, [
-        { label: '前往 GitHub App Install', href: installUrl },
+      if (!oauthForkExists) {
+        setOverlay(`Step 2/4: ${oauthUserLogin || '你的帳號'} 尚未 fork template，請先 fork。`, [
+          ...(getForkUrl() ? [{ label: '前往 Fork 頁', href: getForkUrl(), secondary: true }] : []),
+          {
+            type: 'button',
+            label: '我已完成 Fork，重新檢查',
+            onClick: async () => {
+              await loadOauthInstallations();
+            },
+          },
+        ]);
+        await sleep(2000);
+        continue;
+      }
+
+      setOverlay('Step 3/4: 已偵測到你有 fork，請安裝 GitHub App 到該 fork（安裝後自動回來）。', [
+        ...(getForkUrl() ? [{ label: '重新 Fork 到其他組織', href: getForkUrl(), secondary: true }] : []),
+        { label: '前往 GitHub App Install', href: installUrl, sameTab: true },
         {
           type: 'button',
-          label: '快速恢復登入',
+          label: '已安裝但沒回來？快速恢復登入',
           secondary: true,
           onClick: async () => {
             const ok = await tryResumeFromCachedInstallation();
-            if (!ok) appendLog('快速恢復失敗：找不到可用安裝快取，請重新安裝一次。');
+            if (!ok) appendLog('快速恢復失敗：找不到可用安裝快取，請改用 installation 清單。');
           },
         },
       ]);
-      await sleep(3000);
+      await sleep(2000);
     }
 
     while (true) {
@@ -357,7 +410,7 @@ async function runSetupWizard({ autoOpenInstall = false } = {}) {
       }
 
       if (probe.data.ok) {
-        setOverlay('檢查完成，fork / App / Actions 都已就緒。');
+        setOverlay('Step 4/4: 檢查完成，fork / App / Actions 都已就緒。');
         appendLog('Setup 檢查完成：可以直接 Build。');
         await sleep(700);
         setOverlayVisible(false);
@@ -411,6 +464,141 @@ async function tryResumeFromCachedInstallation() {
   appendLog(`已使用上次 installation (#${installationId}) 快速恢復登入。`);
   await refreshUser();
   return true;
+}
+
+async function resumeWithInstallationId(installationId) {
+  const res = await tryApi('/api/auth/resume', {
+    method: 'POST',
+    body: JSON.stringify({ installation_id: installationId }),
+  });
+  if (!res.ok) return false;
+  cacheInstallationId(installationId);
+  appendLog(`已使用 installation #${installationId} 建立 session。`);
+  await refreshUser();
+  return true;
+}
+
+async function loadOauthInstallations({ silent = false } = {}) {
+  oauthInstallationsError = '';
+  if (!silent) appendLog('正在查詢 OAuth 使用者可見的 GitHub App installations...');
+  try {
+    const res = await rawApiRequest('/api/oauth/installations', { method: 'GET' });
+    if (res.status === 401) {
+      oauthAuthorized = false;
+      oauthUserLogin = '';
+      oauthForkExists = false;
+      oauthInstallations = [];
+      oauthInstallationsError = 'oauth_unauthorized';
+      if (!silent) appendLog('尚未完成 OAuth 使用者登入，請先點「OAuth 使用者登入（列出安裝）」。');
+      return false;
+    }
+    if (!res.ok) {
+      const text = await res.text();
+      oauthAuthorized = false;
+      oauthUserLogin = '';
+      oauthForkExists = false;
+      oauthInstallations = [];
+      oauthInstallationsError = text || `HTTP ${res.status}`;
+      if (!silent) appendLog(`列出 installations 失敗：${oauthInstallationsError}`);
+      return false;
+    }
+
+    const data = await res.json();
+    oauthAuthorized = true;
+    oauthUserLogin = data.user_login || '';
+    oauthForkExists = !!data.fork_exists;
+    oauthInstallations = Array.isArray(data.installations) ? data.installations : [];
+    if (oauthInstallations.length === 0) {
+      if (!silent) appendLog('查無可用 installations。');
+      return true;
+    }
+
+    if (!silent) {
+      appendLog(`找到 ${oauthInstallations.length} 個 installation：`);
+      for (const inst of oauthInstallations) {
+        appendLog(
+          `- #${inst.installation_id} ${inst.account_login} (${inst.repository_selection}), template_repo_selected=${inst.template_repo_selected}`
+        );
+      }
+    }
+    return true;
+  } catch (err) {
+    oauthAuthorized = false;
+    oauthUserLogin = '';
+    oauthForkExists = false;
+    oauthInstallations = [];
+    oauthInstallationsError = err instanceof Error ? err.message : String(err);
+    if (!silent) appendLog(`列出 installations 失敗：${oauthInstallationsError}`);
+    return false;
+  }
+}
+
+async function openSwitchInstallationOverlay() {
+  if (setupWizardRunning) return;
+  setOverlayVisible(true);
+  setOverlay('載入 installations 清單中...');
+
+  const loaded = await loadOauthInstallations();
+  if (!loaded && oauthInstallationsError === 'oauth_unauthorized') {
+    setOverlay('請先完成 OAuth 使用者登入，才能切換 installation。', [
+      { label: 'OAuth 使用者登入', href: getOAuthLoginUrl(), sameTab: true },
+    ]);
+    return;
+  }
+
+  if (!loaded) {
+    setOverlay(`載入 installations 失敗：${oauthInstallationsError || 'unknown error'}`, [
+      {
+        type: 'button',
+        label: '重試',
+        onClick: async () => {
+          await openSwitchInstallationOverlay();
+        },
+      },
+    ]);
+    return;
+  }
+
+  if (oauthInstallations.length === 0) {
+    setOverlay('目前查無可切換的 installations。可先安裝 App 或重新 OAuth 登入。', [
+      { label: '前往 GitHub App Install', href: getInstallUrl(), sameTab: true },
+      { label: 'OAuth 使用者登入', href: getOAuthLoginUrl(), sameTab: true, secondary: true },
+    ]);
+    return;
+  }
+
+  const me = await tryApi('/api/me');
+  const currentInstallationId = me.ok ? Number(me.data.installation_id || 0) : 0;
+  const actions = [
+    {
+      type: 'button',
+      label: '重新整理清單',
+      secondary: true,
+      onClick: async () => {
+        await openSwitchInstallationOverlay();
+      },
+    },
+  ];
+
+  for (const inst of oauthInstallations) {
+    const same = currentInstallationId > 0 && Number(inst.installation_id) === currentInstallationId;
+    const suffix = inst.template_repo_selected === false ? ' (template repo 未授權)' : '';
+    actions.push({
+      type: 'button',
+      label: `${same ? '目前使用中 - ' : ''}#${inst.installation_id} ${inst.account_login}${suffix}`,
+      onClick: async () => {
+        const ok = await resumeWithInstallationId(inst.installation_id);
+        if (!ok) {
+          appendLog(`切換 installation #${inst.installation_id} 失敗。`);
+          return;
+        }
+        appendLog(`已切換至 installation #${inst.installation_id}。`);
+        setOverlayVisible(false);
+      },
+    });
+  }
+
+  setOverlay('選擇要切換的 fork / installation：', actions);
 }
 
 async function ensureFork() {
@@ -684,18 +872,16 @@ el.loginBtn.addEventListener('click', () => {
   }
   const cfg = readConfig();
   saveConfig(cfg);
-  runSetupWizard({ autoOpenInstall: false });
+  runSetupWizard();
 });
 
-el.startBtn.addEventListener('click', async () => {
-  try {
-    const cfg = readConfig();
-    requireFields({ ...cfg, script: '#!ipxe' }, false);
-    saveConfig(cfg);
-    await runSetupWizard({ autoOpenInstall: false });
-  } catch (err) {
-    appendLog(err instanceof Error ? err.message : String(err));
+el.switchInstallBtn.addEventListener('click', async () => {
+  const base = apiBase();
+  if (!base) {
+    appendLog('請先填 Worker API Base URL。');
+    return;
   }
+  await openSwitchInstallationOverlay();
 });
 
 el.logoutBtn.addEventListener('click', async () => {
@@ -705,6 +891,27 @@ el.logoutBtn.addEventListener('click', async () => {
     await refreshUser();
   } catch (err) {
     appendLog(err instanceof Error ? err.message : String(err));
+  }
+});
+
+el.clearCacheBtn.addEventListener('click', async () => {
+  el.clearCacheBtn.disabled = true;
+  try {
+    try {
+      await apiRequest('/api/auth/logout', { method: 'POST' });
+    } catch {
+      // ignore logout failure; continue clearing local cache
+    }
+    clearAllLocalCache();
+    setupWizardAbort = true;
+    setOverlayVisible(false);
+    hideSetupTips();
+    el.userInfo.textContent = '尚未登入。';
+    el.downloadInfo.textContent = '尚無下載連結。';
+    appendLog('已清除本機快取與後端登入 cookie。');
+    appendLog('若仍自動登入，請同時登出 GitHub 或改用無痕視窗測試。');
+  } finally {
+    el.clearCacheBtn.disabled = false;
   }
 });
 
@@ -777,13 +984,13 @@ restoreConfig();
 updateRootCertInfo();
 await refreshTemplateInfo();
 await refreshUser();
-if (new URLSearchParams(window.location.search).get('post_install') === '1') {
-  appendLog('偵測到安裝 callback，啟動 setup 檢查流程...');
-  await runSetupWizard({ autoOpenInstall: false });
-}
-
 el.setupOverlayClose.addEventListener('click', () => {
   setupWizardAbort = true;
   setOverlayVisible(false);
   clearPostInstallFlagFromUrl();
 });
+const initialParams = new URLSearchParams(window.location.search);
+if (initialParams.get('post_install') === '1' || initialParams.get('oauth_done') === '1') {
+  appendLog('偵測到 OAuth/Install callback，啟動 setup 檢查流程...');
+  await runSetupWizard();
+}

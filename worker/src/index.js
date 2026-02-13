@@ -1,5 +1,7 @@
 const COOKIE_SESSION = 'ipxe_sess';
 const COOKIE_STATE = 'ipxe_install_state';
+const COOKIE_OAUTH_STATE = 'ipxe_user_oauth_state';
+const COOKIE_OAUTH_USER = 'ipxe_user_oauth';
 const WORKFLOW_FILE = 'build-ipxe-efi.yml';
 const ARTIFACT_NAME = 'ipxe-efi';
 const GITHUB_USER_AGENT = 'ipxe-builder-worker';
@@ -55,9 +57,24 @@ async function handleRequest(request, env) {
     return authCallback(request, env);
   }
 
+  if (url.pathname === '/api/oauth/login' && request.method === 'GET') {
+    return oauthLogin(env);
+  }
+
+  if (url.pathname === '/api/oauth/callback' && request.method === 'GET') {
+    return oauthCallback(request, env);
+  }
+
   if (url.pathname === '/api/auth/logout' && request.method === 'POST') {
     assertFrontendOrigin(request, env);
     return logout(env, request);
+  }
+
+  if (url.pathname === '/api/oauth/installations' && request.method === 'GET') {
+    assertFrontendOrigin(request, env);
+    const userToken = await requireOauthUserToken(request, env);
+    const result = await listUserInstallations(userToken, env);
+    return json(result, {}, env, request);
   }
 
   if (url.pathname === '/api/auth/resume' && request.method === 'POST') {
@@ -348,6 +365,90 @@ async function authCallback(request, env) {
   return createSessionRedirectResponse(accountLogin, installationId, `${env.FRONTEND_ORIGIN}?post_install=1`, env, true);
 }
 
+function getOauthRedirectUri(env) {
+  const appBase = must(env.APP_BASE_URL, 'missing APP_BASE_URL');
+  return `${appBase.replace(/\/$/, '')}/api/oauth/callback`;
+}
+
+async function oauthLogin(env) {
+  const state = randomHex(20);
+  const clientId = must(env.GITHUB_OAUTH_CLIENT_ID, 'missing GITHUB_OAUTH_CLIENT_ID');
+  const oauthUrl = new URL('https://github.com/login/oauth/authorize');
+  oauthUrl.searchParams.set('client_id', clientId);
+  oauthUrl.searchParams.set('redirect_uri', getOauthRedirectUri(env));
+  oauthUrl.searchParams.set('scope', 'read:user read:org');
+  oauthUrl.searchParams.set('state', state);
+
+  const signedState = await createSignedValue(env.SESSION_SECRET, {
+    state,
+    exp: Date.now() + 10 * 60 * 1000,
+  });
+
+  const headers = new Headers();
+  headers.set('Location', oauthUrl.toString());
+  headers.append('Set-Cookie', makeCookie(COOKIE_OAUTH_STATE, signedState, 600));
+  return new Response(null, { status: 302, headers });
+}
+
+async function oauthCallback(request, env) {
+  const url = new URL(request.url);
+  const code = must(url.searchParams.get('code'), 'missing oauth code');
+  const state = must(url.searchParams.get('state'), 'missing oauth state');
+
+  const cookies = getCookieMap(request);
+  const rawState = cookies.get(COOKIE_OAUTH_STATE);
+  const stateObj = await verifySignedValue(env.SESSION_SECRET, rawState);
+  if (!stateObj || stateObj.state !== state || Number(stateObj.exp) < Date.now()) {
+    throw new Error('invalid oauth state');
+  }
+
+  const token = await exchangeOauthToken(code, env);
+  const me = await githubRequest('https://api.github.com/user', token);
+  const oauthSigned = await createSignedValue(env.SESSION_SECRET, {
+    token,
+    login: me.login,
+    exp: Date.now() + 7 * 24 * 60 * 60 * 1000,
+  });
+
+  const headers = new Headers();
+  headers.set('Location', `${env.FRONTEND_ORIGIN}?oauth_done=1`);
+  headers.append('Set-Cookie', clearCookie(COOKIE_OAUTH_STATE));
+  headers.append('Set-Cookie', makeCookie(COOKIE_OAUTH_USER, oauthSigned, 7 * 24 * 60 * 60));
+  return new Response(null, { status: 302, headers });
+}
+
+async function exchangeOauthToken(code, env) {
+  const clientId = must(env.GITHUB_OAUTH_CLIENT_ID, 'missing GITHUB_OAUTH_CLIENT_ID');
+  const clientSecret = must(env.GITHUB_OAUTH_CLIENT_SECRET, 'missing GITHUB_OAUTH_CLIENT_SECRET');
+  const body = new URLSearchParams({
+    client_id: clientId,
+    client_secret: clientSecret,
+    code,
+    redirect_uri: getOauthRedirectUri(env),
+  });
+
+  const res = await fetch('https://github.com/login/oauth/access_token', {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'User-Agent': GITHUB_USER_AGENT,
+    },
+    body: body.toString(),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`GitHub OAuth token exchange ${res.status}: ${text}`);
+  }
+
+  const jsonBody = await res.json();
+  if (jsonBody.error) {
+    throw new Error(`GitHub OAuth error: ${jsonBody.error_description || jsonBody.error}`);
+  }
+  return must(jsonBody.access_token, 'missing oauth access token');
+}
+
 async function authResume(installationId, env, request) {
   if (!Number.isFinite(installationId) || installationId <= 0) {
     throw new Error('invalid installation_id');
@@ -387,6 +488,8 @@ function logout(env, request) {
   headers.set('Content-Type', 'application/json; charset=utf-8');
   headers.append('Set-Cookie', clearCookie(COOKIE_SESSION));
   headers.append('Set-Cookie', clearCookie(COOKIE_STATE));
+  headers.append('Set-Cookie', clearCookie(COOKIE_OAUTH_STATE));
+  headers.append('Set-Cookie', clearCookie(COOKIE_OAUTH_USER));
   return new Response(JSON.stringify({ ok: true }), { status: 200, headers });
 }
 
@@ -398,6 +501,16 @@ async function requireSession(request, env) {
     throw new Response('Unauthorized', { status: 401 });
   }
   return session;
+}
+
+async function requireOauthUserToken(request, env) {
+  const cookies = getCookieMap(request);
+  const raw = cookies.get(COOKIE_OAUTH_USER);
+  const oauth = await verifySignedValue(env.SESSION_SECRET, raw);
+  if (!oauth || !oauth.token || Number(oauth.exp) < Date.now()) {
+    throw new Response('OAuth Unauthorized', { status: 401 });
+  }
+  return oauth.token;
 }
 
 async function githubRequest(url, token, init = {}) {
@@ -471,6 +584,57 @@ async function appRequest(url, env, init = {}) {
 
 async function getInstallation(installationId, env) {
   return appRequest(`https://api.github.com/app/installations/${installationId}`, env);
+}
+
+async function listUserInstallations(userToken, env) {
+  const cfg = getTemplateConfig(env);
+  const repoName = cfg.templateRepo;
+  const me = await githubRequest('https://api.github.com/user', userToken);
+  const userLogin = must(me?.login, 'missing oauth user login');
+  const forkCheck = await fetch(`https://api.github.com/repos/${userLogin}/${repoName}`, {
+    headers: {
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      'User-Agent': GITHUB_USER_AGENT,
+    },
+  });
+  const forkExists = forkCheck.status === 200;
+
+  const list = await githubRequest('https://api.github.com/user/installations?per_page=100', userToken);
+  const installations = list?.installations || [];
+
+  const out = [];
+  for (const inst of installations) {
+    const item = {
+      installation_id: inst.id,
+      account_login: inst.account?.login || '',
+      account_type: inst.account?.type || '',
+      repository_selection: inst.repository_selection || 'unknown',
+      html_url: `https://github.com/settings/installations/${inst.id}`,
+      template_repo_selected: null,
+    };
+
+    if (item.repository_selection === 'all') {
+      item.template_repo_selected = true;
+      out.push(item);
+      continue;
+    }
+
+    try {
+      const repos = await githubRequest(
+        `https://api.github.com/user/installations/${inst.id}/repositories?per_page=100`,
+        userToken
+      );
+      const hasRepo = (repos?.repositories || []).some((r) => r?.name === repoName);
+      item.template_repo_selected = hasRepo;
+    } catch {
+      item.template_repo_selected = null;
+    }
+
+    out.push(item);
+  }
+
+  return { user_login: userLogin, fork_exists: forkExists, installations: out };
 }
 
 async function getInstallationAccessToken(installationId, env) {

@@ -9,19 +9,21 @@
 
 ## 系統流程
 
-1. 使用者在前端按 `Start (Fork -> Install)` 或 `GitHub App Login/Install`。
-2. 前端會顯示 Setup Overlay，分步自動檢查：
-   - 是否已完成 GitHub App 安裝登入
-   - fork repo 是否存在
-   - GitHub App 是否可存取該 fork
-   - Actions workflow 是否可用
-3. 若缺步驟（例如尚未 fork 或 Actions 未啟用），Overlay 會提供對應連結（新分頁）並持續自動輪詢檢查。
-4. GitHub 以 `installation_id` 回呼 Worker 後，原頁會自動續跑檢查流程。
-5. 全部 ready 後，Overlay 自動關閉，使用者可直接 Build。
-6. 若使用者曾安裝過 App 但 logout 後無法從安裝頁回跳，可用 Overlay 的「快速恢復登入」直接以上次 installation 重新建立 session。
-5. 前端可上傳多個 Root CA（PEM），按 `Build + Auto Download` 後由 Worker 觸發 workflow。
-6. 前端輪詢 run；成功時會自動下載 artifact，並保留手動下載連結。
-7. 前端排程 10 分鐘後呼叫 cleanup API 刪除 artifact（也可手動 `Clean Now`）。
+1. 使用者在前端按 `GitHub App Login/Install`。
+2. Step 1: 先做 OAuth 使用者登入（同分頁），登入後自動回原頁。
+3. Step 2: 系統自動查詢 installations：
+   - 若有 installation：列出清單供使用者選擇並恢復 session
+   - 若沒有 installation：進入 fork 檢查流程
+4. Step 3: fork 檢查流程：
+   - 若已 fork：引導到 App install
+   - 若未 fork：提示先 fork，完成後自動重查
+5. Step 4: App install 後 callback 回來，自動檢查 App 存取與 Actions workflow 是否可用。
+6. 全部 ready 後，Overlay 自動關閉，使用者可直接 Build。
+7. `Clear All Cache` 會同時清本機快取與 Worker cookie，方便重置測試狀態。
+8. `Switch Fork/Installation` 可列出 OAuth 可見的 installations，並直接切換到另一個 fork。
+9. 前端可上傳多個 Root CA（PEM），按 `Build + Auto Download` 後由 Worker 觸發 workflow。
+10. 前端輪詢 run；成功時會自動下載 artifact，並保留手動下載連結。
+11. 前端排程 10 分鐘後呼叫 cleanup API 刪除 artifact（也可手動 `Clean Now`）。
 
 ## 必要前置
 
@@ -38,6 +40,7 @@
    - `GitHub App name`: 自訂
    - `Homepage URL`: 你的 Pages 網址
    - `Setup URL`: `https://<worker-domain>/api/auth/callback`
+   - `Callback URL`: `https://<worker-domain>/api/oauth/callback`（OAuth 使用者授權）
 2. Webhook：
    - 可先關閉（此專案不需要 webhook）
 3. Repository permissions：
@@ -49,6 +52,7 @@
 5. 建立後記下：
    - `App ID`
    - `App slug`
+   - `Client ID`
 6. 產生私鑰：
    - 在 App 頁面 `Private keys -> Generate a private key`
    - 下載 PEM 內容，供 Worker secret 使用
@@ -62,6 +66,7 @@
 - `APP_BASE_URL`：例如 `https://ipxe-builder-api.<subdomain>.workers.dev`
 - `GITHUB_APP_ID`：GitHub App ID
 - `GITHUB_APP_SLUG`：GitHub App slug
+- `GITHUB_OAUTH_CLIENT_ID`：GitHub App Client ID（供 OAuth 列 installations）
 - `TEMPLATE_OWNER`：模板 repo owner（例如 `allenyllee`）
 - `TEMPLATE_REPO`：模板 repo name（例如 `ipxe-builder-template`）
 - `TEMPLATE_BRANCH`：固定分支（預設 `main`）
@@ -72,6 +77,7 @@
 
 ```bash
 wrangler secret put GITHUB_APP_PRIVATE_KEY
+wrangler secret put GITHUB_OAUTH_CLIENT_SECRET
 wrangler secret put SESSION_SECRET
 ```
 
@@ -97,6 +103,7 @@ wrangler secret put SESSION_SECRET
    - `APP_BASE_URL = "http://127.0.0.1:8787"`
 2. 複製 `worker/.dev.vars.example` 成 `worker/.dev.vars`，填入：
    - `GITHUB_APP_PRIVATE_KEY`
+   - `GITHUB_OAUTH_CLIENT_SECRET`
    - `SESSION_SECRET`
 3. 啟動 Worker：
 
