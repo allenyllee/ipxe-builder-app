@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>iPXE EFI Builder</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="container">
+      <h1>iPXE EFI Builder</h1>
+      <p>
+        GitHub Pages 前端 + Cloudflare Worker + GitHub Login。使用者在自己的 fork repo
+        觸發 build，成功後自動下載並刪除 artifact。
+      </p>
+
+      <section class="card">
+        <label for="apiBase">Worker API Base URL</label>
+        <input id="apiBase" type="text" placeholder="https://ipxe-builder-api.<subdomain>.workers.dev" />
+
+        <div class="actions">
+          <button id="loginBtn">GitHub Login</button>
+          <button id="logoutBtn" class="secondary">Logout</button>
+        </div>
+
+        <div id="userInfo" class="status">尚未登入。</div>
+        <div id="templateInfo" class="status">Template: 載入中...</div>
+
+        <label for="script">iPXE Script</label>
+        <textarea id="script" rows="14" spellcheck="false">#!ipxe
+
+dhcp
+chain http://boot.ipxe.org/demo/boot.php
+</textarea>
+
+        <div class="actions">
+          <button id="forkBtn" class="secondary">Ensure Fork</button>
+          <button id="buildBtn">Build + Auto Download</button>
+          <button id="checkBtn" class="secondary">Check Latest Run</button>
+        </div>
+
+        <pre id="log" class="log">準備就緒。</pre>
+      </section>
+    </main>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

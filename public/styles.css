@@ -1,0 +1,129 @@
+:root {
+  --bg: #f7f8fc;
+  --card: #ffffff;
+  --text: #1a1e2a;
+  --muted: #5f667a;
+  --primary: #0d9488;
+  --primary-press: #0b7d72;
+  --border: #d9dfef;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "IBM Plex Sans", "Noto Sans TC", sans-serif;
+  color: var(--text);
+  background:
+    radial-gradient(circle at 8% 12%, #dffcf7 0%, transparent 36%),
+    radial-gradient(circle at 92% 88%, #dbeafe 0%, transparent 30%),
+    var(--bg);
+  min-height: 100vh;
+}
+
+.container {
+  width: min(920px, 92vw);
+  margin: 44px auto;
+}
+
+h1 {
+  margin: 0 0 8px;
+  font-size: clamp(1.8rem, 2.6vw, 2.4rem);
+}
+
+p {
+  margin: 0 0 20px;
+  color: var(--muted);
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 20px;
+  display: grid;
+  gap: 10px;
+  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.08);
+}
+
+label {
+  font-size: 0.92rem;
+  font-weight: 650;
+}
+
+input,
+textarea,
+button {
+  font: inherit;
+}
+
+input,
+textarea {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  outline: none;
+  background: #fff;
+}
+
+textarea {
+  resize: vertical;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+}
+
+input:focus,
+textarea:focus {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(13, 148, 136, 0.2);
+}
+
+.actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.status {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #f8fafc;
+  color: #334155;
+  font-size: 0.95rem;
+}
+
+button {
+  border: none;
+  background: var(--primary);
+  color: #fff;
+  padding: 10px 16px;
+  border-radius: 10px;
+  cursor: pointer;
+  font-weight: 650;
+}
+
+button:hover {
+  background: var(--primary-press);
+}
+
+button.secondary {
+  background: #334155;
+}
+
+button.secondary:hover {
+  background: #1f2937;
+}
+
+.log {
+  margin: 0;
+  border-radius: 10px;
+  background: #0b1020;
+  color: #e4e7f1;
+  padding: 12px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+}

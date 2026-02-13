@@ -1,0 +1,11 @@
+name = "ipxe-builder-api"
+main = "src/index.js"
+compatibility_date = "2025-01-01"
+
+[vars]
+FRONTEND_ORIGIN = "https://<your-user>.github.io"
+APP_BASE_URL = "https://ipxe-builder-api.<subdomain>.workers.dev"
+GITHUB_CLIENT_ID = "<github-oauth-client-id>"
+TEMPLATE_OWNER = "<template-owner>"
+TEMPLATE_REPO = "<template-repo>"
+TEMPLATE_BRANCH = "main"
