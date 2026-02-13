@@ -2,6 +2,7 @@ const COOKIE_SESSION = 'ipxe_sess';
 const COOKIE_STATE = 'ipxe_oauth_state';
 const WORKFLOW_FILE = 'build-ipxe-efi.yml';
 const ARTIFACT_NAME = 'ipxe-efi';
+const GITHUB_USER_AGENT = 'ipxe-builder-worker';
 
 export default {
   async fetch(request, env, ctx) {
@@ -325,6 +326,7 @@ async function githubRequest(url, token, init = {}) {
       Accept: 'application/vnd.github+json',
       Authorization: `Bearer ${token}`,
       'X-GitHub-Api-Version': '2022-11-28',
+      'User-Agent': GITHUB_USER_AGENT,
       ...(init.headers || {}),
     },
   });
@@ -357,6 +359,7 @@ async function ensureFork(token, env) {
       Accept: 'application/vnd.github+json',
       Authorization: `Bearer ${token}`,
       'X-GitHub-Api-Version': '2022-11-28',
+      'User-Agent': GITHUB_USER_AGENT,
     },
   });
   if (repoCheck.ok) {
@@ -465,7 +468,33 @@ async function downloadArtifact(token, runId, cleanup, env, request) {
     throw new Error('artifact not found');
   }
 
-  const zipRes = await githubRequest(artifact.archive_download_url, token);
+  // GitHub artifact download URL usually redirects to a signed storage URL.
+  // Follow redirect manually and avoid forwarding GitHub Authorization header
+  // to the storage host, otherwise some providers reject it as malformed auth.
+  const ghZipRes = await fetch(artifact.archive_download_url, {
+    method: 'GET',
+    redirect: 'manual',
+    headers: {
+      Accept: 'application/vnd.github+json',
+      Authorization: `Bearer ${token}`,
+      'X-GitHub-Api-Version': '2022-11-28',
+      'User-Agent': GITHUB_USER_AGENT,
+    },
+  });
+
+  let zipRes = ghZipRes;
+  if ([301, 302, 307, 308].includes(ghZipRes.status)) {
+    const location = ghZipRes.headers.get('location');
+    if (!location) {
+      throw new Error('artifact redirect missing location header');
+    }
+    zipRes = await fetch(location, { method: 'GET' });
+  }
+
+  if (!zipRes.ok) {
+    const text = await zipRes.text();
+    throw new Error(`artifact download failed ${zipRes.status}: ${text}`);
+  }
   const headers = new Headers(corsHeaders(env, request));
   headers.set('Content-Type', 'application/zip');
   headers.set('Content-Disposition', `attachment; filename="ipxe-efi-run-${runId}.zip"`);

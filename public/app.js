@@ -18,6 +18,10 @@ function appendLog(msg) {
   el.log.textContent = `[${ts}] ${msg}\n${el.log.textContent}`;
 }
 
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
 function apiBase() {
   return el.apiBase.value.trim().replace(/\/$/, '');
 }
@@ -88,6 +92,20 @@ async function apiRequest(path, init = {}) {
   return res;
 }
 
+async function apiRequestWithRetry(path, init = {}, attempts = 3, delayMs = 500) {
+  let lastErr;
+  for (let i = 1; i <= attempts; i += 1) {
+    try {
+      return await apiRequest(path, init);
+    } catch (err) {
+      lastErr = err;
+      if (i === attempts) break;
+      await sleep(delayMs);
+    }
+  }
+  throw lastErr;
+}
+
 async function refreshTemplateInfo() {
   try {
     const cfg = await apiRequest('/api/config');
@@ -143,7 +161,7 @@ async function checkLatestRun() {
   requireFields({ ...cfg, script: '#!ipxe' }, false);
 
   appendLog('查詢最新 workflow run...');
-  const data = await apiRequest('/api/build/latest');
+  const data = await apiRequestWithRetry('/api/build/latest', {}, 3, 600);
   const run = data.run;
   appendLog(`Run #${run.run_number}: status=${run.status}, conclusion=${run.conclusion || 'N/A'}`);
   appendLog(`Run URL: ${run.html_url}`);
@@ -188,7 +206,7 @@ async function pollUntilDone(maxAttempts = 15, intervalMs = 5000) {
     appendLog(`輪詢進度 ${i}/${maxAttempts}...`);
 
     try {
-      const data = await apiRequest('/api/build/latest');
+      const data = await apiRequestWithRetry('/api/build/latest', {}, 3, 600);
       const run = data.run;
       appendLog(`Run #${run.run_number}: status=${run.status}, conclusion=${run.conclusion || 'N/A'}`);
 
@@ -201,7 +219,12 @@ async function pollUntilDone(maxAttempts = 15, intervalMs = 5000) {
         return;
       }
     } catch (err) {
-      appendLog(err instanceof Error ? err.message : String(err));
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('internal error; reference =')) {
+        appendLog(`Warning: 暫時性後端錯誤，系統會持續重試。(${msg})`);
+      } else {
+        appendLog(msg);
+      }
     }
   }
 

@@ -67,10 +67,23 @@ wrangler secret put SESSION_SECRET
 
 ## 本機開發建議
 
-- 先在 Cloudflare 部署 Worker，拿到 `workers.dev` 網址。
-- 前端 `Worker API Base URL` 填該網址。
-- 在瀏覽器登入後測試 `Ensure Fork -> Build + Auto Download`。
-- 前端會顯示 `Template: owner/repo @ branch (固定)`，以 Worker 設定為準。
+1. 調整 `worker/wrangler.toml`（本機）：
+   - `FRONTEND_ORIGIN = "http://localhost:8080"`
+   - `APP_BASE_URL = "http://127.0.0.1:8787"`
+2. 複製 `worker/.dev.vars.example` 成 `worker/.dev.vars`，填入：
+   - `GITHUB_CLIENT_SECRET`
+   - `SESSION_SECRET`
+3. 啟動 Worker：
+   - `cd worker`
+   - `npx wrangler@latest dev --port 8787`
+4. 啟動前端靜態頁：
+   - `cd ../public`
+   - `python3 -m http.server 8080`
+5. 開 `http://localhost:8080`，`Worker API Base URL` 填 `http://127.0.0.1:8787`。
+6. 在 GitHub OAuth App 補上本機 callback：
+   - Homepage URL: `http://localhost:8080`
+   - Callback URL: `http://127.0.0.1:8787/api/auth/callback`
+7. 在瀏覽器測試 `Ensure Fork -> Build + Auto Download`。
 
 ## 檔案
 
