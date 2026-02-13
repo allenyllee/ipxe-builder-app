@@ -60,6 +60,13 @@ async function handleRequest(request, env) {
     return logout(env, request);
   }
 
+  if (url.pathname === '/api/auth/resume' && request.method === 'POST') {
+    assertFrontendOrigin(request, env);
+    const payload = await parseJson(request);
+    const installationId = Number(must(payload.installation_id, 'missing installation_id'));
+    return authResume(installationId, env, request);
+  }
+
   if (url.pathname === '/api/me' && request.method === 'GET') {
     assertFrontendOrigin(request, env);
     const session = await requireSession(request, env);
@@ -82,6 +89,14 @@ async function handleRequest(request, env) {
     return json(result, {}, env, request);
   }
 
+  if (url.pathname === '/api/fork/status' && request.method === 'GET') {
+    assertFrontendOrigin(request, env);
+    const session = await requireSession(request, env);
+    const token = await getInstallationAccessToken(session.installation_id, env);
+    const result = await forkStatus(token, session.account_login, env);
+    return json(result, {}, env, request);
+  }
+
   if (url.pathname === '/api/build/start' && request.method === 'POST') {
     assertFrontendOrigin(request, env);
     const session = await requireSession(request, env);
@@ -96,6 +111,14 @@ async function handleRequest(request, env) {
     const session = await requireSession(request, env);
     const token = await getInstallationAccessToken(session.installation_id, env);
     const result = await latestRun(token, session.account_login, env);
+    return json(result, {}, env, request);
+  }
+
+  if (url.pathname === '/api/build/probe' && request.method === 'GET') {
+    assertFrontendOrigin(request, env);
+    const session = await requireSession(request, env);
+    const token = await getInstallationAccessToken(session.installation_id, env);
+    const result = await probeWorkflow(token, session.account_login, env);
     return json(result, {}, env, request);
   }
 
@@ -322,16 +345,39 @@ async function authCallback(request, env) {
 
   const installation = await getInstallation(installationId, env);
   const accountLogin = must(installation?.account?.login, 'missing installation account login');
+  return createSessionRedirectResponse(accountLogin, installationId, `${env.FRONTEND_ORIGIN}?post_install=1`, env, true);
+}
 
+async function authResume(installationId, env, request) {
+  if (!Number.isFinite(installationId) || installationId <= 0) {
+    throw new Error('invalid installation_id');
+  }
+  const installation = await getInstallation(installationId, env);
+  const accountLogin = must(installation?.account?.login, 'missing installation account login');
   const session = await createSignedValue(env.SESSION_SECRET, {
     installation_id: installationId,
     account_login: accountLogin,
     exp: Date.now() + 7 * 24 * 60 * 60 * 1000,
   });
 
+  const headers = new Headers(corsHeaders(env, request));
+  headers.set('Content-Type', 'application/json; charset=utf-8');
+  headers.append('Set-Cookie', makeCookie(COOKIE_SESSION, session, 7 * 24 * 60 * 60));
+  return new Response(JSON.stringify({ ok: true, login: accountLogin, installation_id: installationId }), {
+    status: 200,
+    headers,
+  });
+}
+
+async function createSessionRedirectResponse(accountLogin, installationId, location, env, clearStateCookie = false) {
+  const session = await createSignedValue(env.SESSION_SECRET, {
+    installation_id: installationId,
+    account_login: accountLogin,
+    exp: Date.now() + 7 * 24 * 60 * 60 * 1000,
+  });
   const headers = new Headers();
-  headers.set('Location', env.FRONTEND_ORIGIN);
-  headers.append('Set-Cookie', clearCookie(COOKIE_STATE));
+  headers.set('Location', location);
+  if (clearStateCookie) headers.append('Set-Cookie', clearCookie(COOKIE_STATE));
   headers.append('Set-Cookie', makeCookie(COOKIE_SESSION, session, 7 * 24 * 60 * 60));
   return new Response(null, { status: 302, headers });
 }
@@ -473,6 +519,40 @@ async function ensureRepoAccess(token, owner, env) {
   );
 }
 
+async function forkStatus(token, owner, env) {
+  const cfg = getTemplateConfig(env);
+  const repo = cfg.templateRepo;
+  const repoApiUrl = `https://api.github.com/repos/${owner}/${repo}`;
+
+  const existsRes = await fetch(repoApiUrl, {
+    headers: {
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      'User-Agent': GITHUB_USER_AGENT,
+    },
+  });
+  const exists = existsRes.status === 200;
+
+  const accessRes = await fetch(repoApiUrl, {
+    headers: {
+      Accept: 'application/vnd.github+json',
+      Authorization: `Bearer ${token}`,
+      'X-GitHub-Api-Version': '2022-11-28',
+      'User-Agent': GITHUB_USER_AGENT,
+    },
+  });
+  const accessible = accessRes.status === 200;
+
+  return {
+    owner,
+    repo,
+    exists,
+    accessible,
+    fork_url: `https://github.com/${cfg.templateOwner}/${cfg.templateRepo}/fork`,
+    actions_url: `https://github.com/${owner}/${repo}/actions`,
+  };
+}
+
 function toBase64Unicode(input) {
   return bytesToBase64(utf8(input));
 }
@@ -554,6 +634,37 @@ async function latestRun(token, owner, env) {
         }
       : null,
   };
+}
+
+async function probeWorkflow(token, owner, env) {
+  const cfg = getTemplateConfig(env);
+  const repo = cfg.templateRepo;
+  const workflowUrl = `https://api.github.com/repos/${owner}/${repo}/actions/workflows/${WORKFLOW_FILE}`;
+  const actionsUrl = `https://github.com/${owner}/${repo}/actions`;
+
+  const res = await fetch(workflowUrl, {
+    headers: {
+      Accept: 'application/vnd.github+json',
+      Authorization: `Bearer ${token}`,
+      'X-GitHub-Api-Version': '2022-11-28',
+      'User-Agent': GITHUB_USER_AGENT,
+    },
+  });
+
+  if (res.ok) {
+    return { ok: true, actions_url: actionsUrl };
+  }
+
+  if (res.status === 404) {
+    return {
+      ok: false,
+      reason: 'workflow_not_accessible',
+      actions_url: actionsUrl,
+    };
+  }
+
+  const text = await res.text();
+  throw new Error(`GitHub API ${res.status}: ${text}`);
 }
 
 function tailLines(text, maxLines = 120, maxChars = 12000) {

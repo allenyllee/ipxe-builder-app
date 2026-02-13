@@ -95,6 +95,27 @@ textarea:focus {
   font-size: 0.95rem;
 }
 
+.status-links {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+.status-link {
+  display: inline-block;
+  text-decoration: none;
+  border-radius: 8px;
+  padding: 8px 12px;
+  background: #0f766e;
+  color: #fff;
+  font-weight: 600;
+}
+
+.status-link.secondary {
+  background: #1f2937;
+}
+
 button {
   border: none;
   background: var(--primary);
@@ -126,4 +147,34 @@ button.secondary:hover {
   overflow-x: auto;
   white-space: pre-wrap;
   font-family: "IBM Plex Mono", ui-monospace, monospace;
+}
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(2, 6, 23, 0.55);
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  z-index: 20;
+}
+
+.overlay[hidden] {
+  display: none !important;
+}
+
+.overlay-card {
+  width: min(680px, 100%);
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: 0 16px 40px rgba(2, 6, 23, 0.25);
+  padding: 16px;
+  display: grid;
+  gap: 10px;
+}
+
+.overlay-card h2 {
+  margin: 0;
+  font-size: 1.1rem;
 }

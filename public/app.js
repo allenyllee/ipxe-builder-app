@@ -1,9 +1,11 @@
 const el = {
   apiBase: document.getElementById('apiBase'),
+  startBtn: document.getElementById('startBtn'),
   loginBtn: document.getElementById('loginBtn'),
   logoutBtn: document.getElementById('logoutBtn'),
   userInfo: document.getElementById('userInfo'),
   templateInfo: document.getElementById('templateInfo'),
+  setupTips: document.getElementById('setupTips'),
   script: document.getElementById('script'),
   rootCertFile: document.getElementById('rootCertFile'),
   rootCertInfo: document.getElementById('rootCertInfo'),
@@ -13,13 +15,22 @@ const el = {
   checkBtn: document.getElementById('checkBtn'),
   cleanupBtn: document.getElementById('cleanupBtn'),
   log: document.getElementById('log'),
+  setupOverlay: document.getElementById('setupOverlay'),
+  setupOverlayStatus: document.getElementById('setupOverlayStatus'),
+  setupOverlayActions: document.getElementById('setupOverlayActions'),
+  setupOverlayClose: document.getElementById('setupOverlayClose'),
 };
 
 const STORAGE_KEY = 'ipxe-builder-config-v3';
+const INSTALLATION_CACHE_KEY = 'ipxe-builder-installation-id-v1';
 let rootCertPem = '';
 let rootCertFileCount = 0;
 let cleanupTimer = null;
 let lastArtifactRunId = null;
+let templateConfig = null;
+let setupWizardRunning = false;
+let setupWizardAbort = false;
+let setupPreAuthStep = 0;
 
 function appendLog(msg) {
   const ts = new Date().toISOString().replace('T', ' ').replace('Z', '');
@@ -49,6 +60,22 @@ function saveConfig(cfg) {
       apiBase: cfg.apiBase,
     })
   );
+}
+
+function cacheInstallationId(id) {
+  if (!id) return;
+  localStorage.setItem(INSTALLATION_CACHE_KEY, String(id));
+}
+
+function getCachedInstallationId() {
+  const raw = localStorage.getItem(INSTALLATION_CACHE_KEY) || '';
+  const id = Number(raw);
+  if (!Number.isFinite(id) || id <= 0) return null;
+  return id;
+}
+
+function clearCachedInstallationId() {
+  localStorage.removeItem(INSTALLATION_CACHE_KEY);
 }
 
 function restoreConfig() {
@@ -118,6 +145,7 @@ async function apiRequestWithRetry(path, init = {}, attempts = 3, delayMs = 500)
 async function refreshTemplateInfo() {
   try {
     const cfg = await apiRequest('/api/config');
+    templateConfig = cfg;
     const authText = cfg.auth_mode === 'github_app' ? 'Auth: GitHub App' : 'Auth: Unknown';
     el.templateInfo.textContent =
       `Template: ${cfg.templateOwner}/${cfg.templateRepo} @ ${cfg.branch} (固定) | ${authText}`;
@@ -127,13 +155,262 @@ async function refreshTemplateInfo() {
   }
 }
 
+function getForkUrl() {
+  if (!templateConfig) return '';
+  return `https://github.com/${templateConfig.templateOwner}/${templateConfig.templateRepo}/fork`;
+}
+
+function getInstallUrl() {
+  return `${apiBase()}/api/auth/login`;
+}
+
+function showSetupTips(reason = '', extraLinks = []) {
+  const forkUrl = getForkUrl();
+  const installUrl = getInstallUrl();
+  if (!forkUrl || !apiBase()) return;
+  const tip = reason || '尚未完成可用 repo 授權，請先 fork，再安裝 GitHub App 到 fork repo。';
+  const extra = Array.isArray(extraLinks)
+    ? extraLinks
+        .filter((x) => x && x.href && x.label)
+        .map(
+          (x) =>
+            `<a class="status-link ${x.secondary ? 'secondary' : ''}" href="${x.href}" target="_blank" rel="noopener noreferrer">${x.label}</a>`
+        )
+        .join('')
+    : '';
+  el.setupTips.hidden = false;
+  el.setupTips.innerHTML = `${tip}
+  <div class="status-links">
+    <a class="status-link secondary" href="${forkUrl}" target="_blank" rel="noopener noreferrer">1) 去 Fork Template</a>
+    <a class="status-link" href="${installUrl}">2) 重新 Install App</a>
+    ${extra}
+  </div>`;
+}
+
+function hideSetupTips() {
+  el.setupTips.hidden = true;
+  el.setupTips.textContent = '';
+}
+
+function setOverlayVisible(visible) {
+  el.setupOverlay.hidden = !visible;
+}
+
+function setOverlay(statusText, actions = []) {
+  el.setupOverlayStatus.textContent = statusText;
+  el.setupOverlayActions.innerHTML = '';
+  for (const action of actions) {
+    if (!action || !action.label) continue;
+    if (action.type === 'button') {
+      const b = document.createElement('button');
+      b.className = action.secondary ? 'secondary' : '';
+      b.textContent = action.label;
+      b.addEventListener('click', () => {
+        if (typeof action.onClick === 'function') action.onClick();
+      });
+      el.setupOverlayActions.appendChild(b);
+      continue;
+    }
+    if (!action.href) continue;
+    const a = document.createElement('a');
+    a.className = `status-link ${action.secondary ? 'secondary' : ''}`.trim();
+    a.href = action.href;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    a.textContent = action.label;
+    el.setupOverlayActions.appendChild(a);
+  }
+}
+
+function clearPostInstallFlagFromUrl() {
+  const params = new URLSearchParams(window.location.search);
+  if (!params.has('post_install')) return;
+  params.delete('post_install');
+  const nextUrl = `${window.location.pathname}${params.toString() ? `?${params.toString()}` : ''}${window.location.hash}`;
+  window.history.replaceState({}, '', nextUrl);
+}
+
+function isUnauthorizedError(err) {
+  const msg = err instanceof Error ? err.message : String(err);
+  return msg.includes('API error 401') || msg.includes('尚未登入 GitHub App');
+}
+
+async function tryApi(path, init = {}) {
+  try {
+    const data = await apiRequest(path, init);
+    return { ok: true, data };
+  } catch (err) {
+    return { ok: false, err };
+  }
+}
+
+async function runSetupWizard({ autoOpenInstall = false } = {}) {
+  if (setupWizardRunning) return;
+  setupWizardRunning = true;
+  setupWizardAbort = false;
+  setupPreAuthStep = 0;
+  setOverlayVisible(true);
+
+  const installUrl = getInstallUrl();
+  const resumed = await tryResumeFromCachedInstallation();
+  if (resumed) {
+    appendLog('已恢復登入，繼續檢查 fork / Actions 狀態。');
+  }
+
+  try {
+    while (true) {
+      if (setupWizardAbort) return;
+      const me = await tryApi('/api/me');
+      if (me.ok) {
+        await refreshUser();
+        break;
+      }
+
+      const forkUrl = getForkUrl();
+      const is401 = isUnauthorizedError(me.err);
+      if (is401 && setupPreAuthStep === 0) {
+        setOverlay('Step 1/2: 先 fork Template Repo。完成後按「下一步」。', [
+          ...(forkUrl ? [{ label: '前往 Fork 頁', href: forkUrl, secondary: true }] : []),
+          {
+            type: 'button',
+            label: '我已完成 Fork，下一步',
+            onClick: () => {
+              setupPreAuthStep = 1;
+            },
+          },
+        ]);
+        await sleep(1000);
+        continue;
+      }
+
+      if (is401 && setupPreAuthStep === 1) {
+        setOverlay('Step 2/2: 安裝 GitHub App 到你的 fork repo。完成後會自動繼續。', [
+          { label: '前往 GitHub App Install', href: installUrl },
+          {
+            type: 'button',
+            label: '已安裝但沒回來？快速恢復登入',
+            secondary: true,
+            onClick: async () => {
+              const ok = await tryResumeFromCachedInstallation();
+              if (!ok) appendLog('快速恢復失敗：找不到可用安裝快取，請重新安裝一次。');
+            },
+          },
+        ]);
+        await sleep(3000);
+        continue;
+      }
+
+      setOverlay(`等待登入狀態可用：${me.err instanceof Error ? me.err.message : String(me.err)}`, [
+        { label: '前往 GitHub App Install', href: installUrl },
+        {
+          type: 'button',
+          label: '快速恢復登入',
+          secondary: true,
+          onClick: async () => {
+            const ok = await tryResumeFromCachedInstallation();
+            if (!ok) appendLog('快速恢復失敗：找不到可用安裝快取，請重新安裝一次。');
+          },
+        },
+      ]);
+      await sleep(3000);
+    }
+
+    while (true) {
+      if (setupWizardAbort) return;
+      const status = await tryApi('/api/fork/status');
+      if (!status.ok) {
+        if (isUnauthorizedError(status.err)) {
+          setOverlay('登入已失效，請重新安裝 GitHub App。', [{ label: '重新 Install', href: installUrl }]);
+          await sleep(3000);
+          continue;
+        }
+        setOverlay(`檢查 fork 狀態失敗：${status.err instanceof Error ? status.err.message : String(status.err)}`);
+        await sleep(3000);
+        continue;
+      }
+
+      const data = status.data;
+      if (!data.exists) {
+        setOverlay('正在等待 fork 完成...', [{ label: '前往 Fork 頁', href: data.fork_url, secondary: true }]);
+        await sleep(3000);
+        continue;
+      }
+
+      if (!data.accessible) {
+        setOverlay('fork 已存在，但 GitHub App 尚未安裝到該 fork。', [{ label: '安裝 GitHub App 到 fork', href: installUrl }]);
+        await sleep(3000);
+        continue;
+      }
+
+      appendLog(`Repo ready: ${data.owner}/${data.repo} (fork exists + app accessible)`);
+      hideSetupTips();
+      break;
+    }
+
+    while (true) {
+      if (setupWizardAbort) return;
+      const probe = await tryApi('/api/build/probe');
+      if (!probe.ok) {
+        setOverlay(`檢查 Actions 狀態失敗：${probe.err instanceof Error ? probe.err.message : String(probe.err)}`);
+        await sleep(3000);
+        continue;
+      }
+
+      if (probe.data.ok) {
+        setOverlay('檢查完成，fork / App / Actions 都已就緒。');
+        appendLog('Setup 檢查完成：可以直接 Build。');
+        await sleep(700);
+        setOverlayVisible(false);
+        clearPostInstallFlagFromUrl();
+        return;
+      }
+
+      if (probe.data.reason === 'workflow_not_accessible') {
+        setOverlay('請先在 fork repo 的 Actions 頁啟用 workflows（此頁會自動重試檢查）。', [
+          { label: '前往 Actions 頁', href: probe.data.actions_url },
+        ]);
+        await sleep(3000);
+        continue;
+      }
+
+      setOverlay('Actions 狀態未知，請稍後重試。');
+      await sleep(3000);
+    }
+  } finally {
+    setupWizardRunning = false;
+    setupWizardAbort = false;
+  }
+}
+
 async function refreshUser() {
   try {
     const me = await apiRequest('/api/me');
     el.userInfo.textContent = `已登入：${me.login}`;
+    if (me.installation_id) {
+      cacheInstallationId(me.installation_id);
+    }
+    hideSetupTips();
   } catch {
     el.userInfo.textContent = '尚未登入。';
   }
+}
+
+async function tryResumeFromCachedInstallation() {
+  const installationId = getCachedInstallationId();
+  if (!installationId) return false;
+
+  const res = await tryApi('/api/auth/resume', {
+    method: 'POST',
+    body: JSON.stringify({ installation_id: installationId }),
+  });
+  if (!res.ok) {
+    clearCachedInstallationId();
+    return false;
+  }
+
+  appendLog(`已使用上次 installation (#${installationId}) 快速恢復登入。`);
+  await refreshUser();
+  return true;
 }
 
 async function ensureFork() {
@@ -148,6 +425,7 @@ async function ensureFork() {
   });
 
   appendLog(`Repo ready: ${result.owner}/${result.repo} (created=${result.created})`);
+  hideSetupTips();
 }
 
 async function dispatchBuild() {
@@ -406,7 +684,18 @@ el.loginBtn.addEventListener('click', () => {
   }
   const cfg = readConfig();
   saveConfig(cfg);
-  window.location.href = `${base}/api/auth/login`;
+  runSetupWizard({ autoOpenInstall: false });
+});
+
+el.startBtn.addEventListener('click', async () => {
+  try {
+    const cfg = readConfig();
+    requireFields({ ...cfg, script: '#!ipxe' }, false);
+    saveConfig(cfg);
+    await runSetupWizard({ autoOpenInstall: false });
+  } catch (err) {
+    appendLog(err instanceof Error ? err.message : String(err));
+  }
 });
 
 el.logoutBtn.addEventListener('click', async () => {
@@ -424,7 +713,11 @@ el.forkBtn.addEventListener('click', async () => {
   try {
     await ensureFork();
   } catch (err) {
-    appendLog(err instanceof Error ? err.message : String(err));
+    const msg = err instanceof Error ? err.message : String(err);
+    appendLog(msg);
+    if (msg.includes('repo not accessible for GitHub App installation')) {
+      showSetupTips('目前找不到可存取的 fork repo。');
+    }
   } finally {
     el.forkBtn.disabled = false;
   }
@@ -482,5 +775,15 @@ el.rootCertFile.addEventListener('change', async (ev) => {
 
 restoreConfig();
 updateRootCertInfo();
-refreshTemplateInfo();
-refreshUser();
+await refreshTemplateInfo();
+await refreshUser();
+if (new URLSearchParams(window.location.search).get('post_install') === '1') {
+  appendLog('偵測到安裝 callback，啟動 setup 檢查流程...');
+  await runSetupWizard({ autoOpenInstall: false });
+}
+
+el.setupOverlayClose.addEventListener('click', () => {
+  setupWizardAbort = true;
+  setOverlayVisible(false);
+  clearPostInstallFlagFromUrl();
+});

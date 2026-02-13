@@ -9,10 +9,16 @@
 
 ## 系統流程
 
-1. 使用者在前端按 `GitHub App Login/Install`。
-2. Worker 導向 GitHub App 安裝頁，使用者選擇自己的帳號/organization 與 repo。
-3. GitHub 以 `installation_id` 回呼 Worker，Worker 建立 session cookie。
-4. 前端按 `Check Fork Access`，Worker 檢查 `<user>/<template-repo>` 是否可被該 installation 存取。
+1. 使用者在前端按 `Start (Fork -> Install)` 或 `GitHub App Login/Install`。
+2. 前端會顯示 Setup Overlay，分步自動檢查：
+   - 是否已完成 GitHub App 安裝登入
+   - fork repo 是否存在
+   - GitHub App 是否可存取該 fork
+   - Actions workflow 是否可用
+3. 若缺步驟（例如尚未 fork 或 Actions 未啟用），Overlay 會提供對應連結（新分頁）並持續自動輪詢檢查。
+4. GitHub 以 `installation_id` 回呼 Worker 後，原頁會自動續跑檢查流程。
+5. 全部 ready 後，Overlay 自動關閉，使用者可直接 Build。
+6. 若使用者曾安裝過 App 但 logout 後無法從安裝頁回跳，可用 Overlay 的「快速恢復登入」直接以上次 installation 重新建立 session。
 5. 前端可上傳多個 Root CA（PEM），按 `Build + Auto Download` 後由 Worker 觸發 workflow。
 6. 前端輪詢 run；成功時會自動下載 artifact，並保留手動下載連結。
 7. 前端排程 10 分鐘後呼叫 cleanup API 刪除 artifact（也可手動 `Clean Now`）。

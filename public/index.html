@@ -19,12 +19,14 @@
         <input id="apiBase" type="text" placeholder="https://ipxe-builder-api.<subdomain>.workers.dev" />
 
         <div class="actions">
+          <button id="startBtn" class="secondary">Start (Fork -> Install)</button>
           <button id="loginBtn">GitHub App Login/Install</button>
           <button id="logoutBtn" class="secondary">Logout</button>
         </div>
 
         <div id="userInfo" class="status">尚未登入。</div>
         <div id="templateInfo" class="status">Template: 載入中...</div>
+        <div id="setupTips" class="status" hidden></div>
 
         <label for="script">iPXE Script</label>
         <textarea id="script" rows="14" spellcheck="false">#!ipxe
@@ -51,5 +53,15 @@ chain http://boot.ipxe.org/demo/boot.php
     </main>
 
     <script type="module" src="./app.js"></script>
+    <div id="setupOverlay" class="overlay" hidden>
+      <div class="overlay-card">
+        <h2>Setup Assistant</h2>
+        <div id="setupOverlayStatus" class="status">準備中...</div>
+        <div id="setupOverlayActions" class="actions"></div>
+        <div class="actions">
+          <button id="setupOverlayClose" class="secondary">關閉</button>
+        </div>
+      </div>
+    </div>
   </body>
 </html>
