@@ -5,6 +5,8 @@ const el = {
   userInfo: document.getElementById('userInfo'),
   templateInfo: document.getElementById('templateInfo'),
   script: document.getElementById('script'),
+  rootCertFile: document.getElementById('rootCertFile'),
+  rootCertInfo: document.getElementById('rootCertInfo'),
   forkBtn: document.getElementById('forkBtn'),
   buildBtn: document.getElementById('buildBtn'),
   checkBtn: document.getElementById('checkBtn'),
@@ -12,6 +14,7 @@ const el = {
 };
 
 const STORAGE_KEY = 'ipxe-builder-config-v3';
+let rootCertPem = '';
 
 function appendLog(msg) {
   const ts = new Date().toISOString().replace('T', ' ').replace('Z', '');
@@ -30,6 +33,7 @@ function readConfig() {
   return {
     apiBase: apiBase(),
     script: el.script.value,
+    rootCertPem,
   };
 }
 
@@ -149,11 +153,47 @@ async function dispatchBuild() {
     method: 'POST',
     body: JSON.stringify({
       script: cfg.script,
+      root_cert_pem: cfg.rootCertPem || '',
     }),
   });
 
   appendLog(`Workflow dispatched to ${result.owner}/${result.repo}@${result.branch}`);
+  if (cfg.rootCertPem) {
+    appendLog('已帶入使用者上傳的 Root CA 憑證。');
+  }
   appendLog('等待約 20-60 秒，系統會自動輪詢並嘗試下載。');
+}
+
+function updateRootCertInfo() {
+  if (!rootCertPem) {
+    el.rootCertInfo.textContent = '未上傳 Root CA，將使用系統預設信任。';
+    return;
+  }
+  const lineCount = rootCertPem.split(/\r?\n/).length;
+  el.rootCertInfo.textContent = `已載入 Root CA（${lineCount} lines）。`;
+}
+
+async function handleRootCertUpload(file) {
+  if (!file) {
+    rootCertPem = '';
+    updateRootCertInfo();
+    return;
+  }
+
+  const text = await file.text();
+  const pem = text.trim();
+  if (!pem) {
+    throw new Error('憑證檔案為空。');
+  }
+  if (!pem.includes('BEGIN CERTIFICATE') || !pem.includes('END CERTIFICATE')) {
+    throw new Error('請上傳 PEM 格式憑證（需包含 BEGIN/END CERTIFICATE）。');
+  }
+  if (pem.length > 120000) {
+    throw new Error('憑證內容過大，請確認是否為單一 root CA 憑證。');
+  }
+
+  rootCertPem = `${pem}\n`;
+  updateRootCertInfo();
 }
 
 async function checkLatestRun() {
@@ -169,6 +209,28 @@ async function checkLatestRun() {
   if (run.status === 'completed' && run.conclusion === 'success' && data.artifact?.id) {
     appendLog('偵測到成功 artifact，開始自動下載...');
     await downloadArtifact(run.id, true);
+    return;
+  }
+
+  if (run.status === 'completed' && run.conclusion !== 'success') {
+    appendLog('偵測到 build 失敗，正在抓取失敗 log...');
+    await showFailedLogs(run.id);
+  }
+}
+
+async function showFailedLogs(runId) {
+  const q = new URLSearchParams({ run_id: String(runId) });
+  const data = await apiRequestWithRetry(`/api/build/logs?${q.toString()}`, {}, 2, 500);
+  const items = data.logs || [];
+  if (items.length === 0) {
+    appendLog('找不到可用的 job log。');
+    return;
+  }
+
+  for (const item of items) {
+    appendLog(`Failed Job: ${item.name} (${item.conclusion})`);
+    appendLog(`Job URL: ${item.html_url}`);
+    appendLog(`--- job log tail ---\n${item.log_tail}\n--- end ---`);
   }
 }
 
@@ -215,6 +277,8 @@ async function pollUntilDone(maxAttempts = 15, intervalMs = 5000) {
           await downloadArtifact(run.id, true);
         } else {
           appendLog('Run 已完成但非 success，請開 Run URL 查看詳細錯誤。');
+          appendLog('正在抓取失敗 log...');
+          await showFailedLogs(run.id);
         }
         return;
       }
@@ -286,6 +350,24 @@ el.checkBtn.addEventListener('click', async () => {
   }
 });
 
+el.rootCertFile.addEventListener('change', async (ev) => {
+  const target = ev.target;
+  const file = target?.files?.[0];
+  try {
+    await handleRootCertUpload(file);
+    if (file) {
+      appendLog(`Root CA 載入成功: ${file.name}`);
+    } else {
+      appendLog('已清除 Root CA。');
+    }
+  } catch (err) {
+    rootCertPem = '';
+    updateRootCertInfo();
+    appendLog(err instanceof Error ? err.message : String(err));
+  }
+});
+
 restoreConfig();
+updateRootCertInfo();
 refreshTemplateInfo();
 refreshUser();

@@ -80,6 +80,14 @@ async function handleRequest(request, env) {
     return json(result, {}, env, request);
   }
 
+  if (url.pathname === '/api/build/logs' && request.method === 'GET') {
+    assertFrontendOrigin(request, env);
+    const token = await requireTokenFromSession(request, env);
+    const runId = Number(must(url.searchParams.get('run_id'), 'missing run_id'));
+    const result = await buildLogs(token, runId, env);
+    return json(result, {}, env, request);
+  }
+
   if (url.pathname === '/api/build/download' && request.method === 'GET') {
     assertFrontendOrigin(request, env);
     const token = await requireTokenFromSession(request, env);
@@ -385,14 +393,24 @@ async function startBuild(token, payload, env) {
   const cfg = getTemplateConfig(env);
   const branch = cfg.branch;
   const script = must(payload.script, 'missing script');
+  const rootCertPem =
+    typeof payload.root_cert_pem === 'string' ? payload.root_cert_pem.trim() : '';
+  if (rootCertPem.length > 120000) {
+    throw new Error('root certificate payload too large');
+  }
 
   const ensured = await ensureFork(token, env);
+  const inputs = {
+    script_b64: toBase64Unicode(script),
+  };
+  if (rootCertPem) {
+    inputs.ca_cert_b64 = toBase64Unicode(`${rootCertPem}\n`);
+  }
+
   const dispatchUrl = `https://api.github.com/repos/${ensured.owner}/${ensured.repo}/actions/workflows/${WORKFLOW_FILE}/dispatches`;
   const dispatchBody = JSON.stringify({
     ref: branch,
-    inputs: {
-      script_b64: toBase64Unicode(script),
-    },
+    inputs,
   });
   for (let i = 0; i < 3; i += 1) {
     try {
@@ -451,6 +469,81 @@ async function latestRun(token, env) {
           expired: artifact.expired,
         }
       : null,
+  };
+}
+
+function tailLines(text, maxLines = 120, maxChars = 12000) {
+  const normalized = String(text || '').replace(/\r\n/g, '\n');
+  const lines = normalized.split('\n');
+  const tail = lines.slice(-maxLines).join('\n');
+  if (tail.length <= maxChars) return tail;
+  return tail.slice(tail.length - maxChars);
+}
+
+async function fetchJobLogTail(logsUrl, token) {
+  const ghRes = await fetch(logsUrl, {
+    method: 'GET',
+    redirect: 'manual',
+    headers: {
+      Accept: 'application/vnd.github+json',
+      Authorization: `Bearer ${token}`,
+      'X-GitHub-Api-Version': '2022-11-28',
+      'User-Agent': GITHUB_USER_AGENT,
+    },
+  });
+
+  let rawRes = ghRes;
+  if ([301, 302, 307, 308].includes(ghRes.status)) {
+    const location = ghRes.headers.get('location');
+    if (!location) throw new Error('job logs redirect missing location header');
+    rawRes = await fetch(location, { method: 'GET' });
+  }
+
+  if (!rawRes.ok) {
+    const text = await rawRes.text();
+    throw new Error(`job logs download failed ${rawRes.status}: ${text}`);
+  }
+
+  const text = await rawRes.text();
+  return tailLines(text);
+}
+
+async function buildLogs(token, runId, env) {
+  const cfg = getTemplateConfig(env);
+  const templateRepo = cfg.templateRepo;
+  const viewer = await getViewer(token);
+  const jobs = await githubRequest(
+    `https://api.github.com/repos/${viewer.login}/${templateRepo}/actions/runs/${runId}/jobs?per_page=100`,
+    token
+  );
+
+  const nonSuccess = new Set(['failure', 'cancelled', 'timed_out', 'action_required', 'startup_failure']);
+  const failedJobs = (jobs?.jobs || []).filter((j) => nonSuccess.has(String(j.conclusion || '').toLowerCase()));
+  const targetJobs = failedJobs.length > 0 ? failedJobs : (jobs?.jobs || []).slice(-1);
+
+  const logs = [];
+  for (const job of targetJobs.slice(0, 2)) {
+    let logTail = '';
+    try {
+      logTail = await fetchJobLogTail(job.logs_url, token);
+    } catch (err) {
+      logTail = `Unable to fetch job log: ${err instanceof Error ? err.message : String(err)}`;
+    }
+
+    logs.push({
+      job_id: job.id,
+      name: job.name,
+      conclusion: job.conclusion,
+      html_url: job.html_url,
+      log_tail: logTail,
+    });
+  }
+
+  return {
+    run_id: runId,
+    owner: viewer.login,
+    repo: templateRepo,
+    logs,
   };
 }
 
