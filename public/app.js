@@ -85,7 +85,7 @@ async function apiRequest(path, init = {}) {
   });
 
   if (res.status === 401) {
-    throw new Error('尚未登入 GitHub，請先點 GitHub Login。');
+    throw new Error('尚未登入 GitHub App，請先點 GitHub App Login/Install。');
   }
 
   if (!res.ok) {
@@ -118,7 +118,9 @@ async function apiRequestWithRetry(path, init = {}, attempts = 3, delayMs = 500)
 async function refreshTemplateInfo() {
   try {
     const cfg = await apiRequest('/api/config');
-    el.templateInfo.textContent = `Template: ${cfg.templateOwner}/${cfg.templateRepo} @ ${cfg.branch} (固定)`;
+    const authText = cfg.auth_mode === 'github_app' ? 'Auth: GitHub App' : 'Auth: Unknown';
+    el.templateInfo.textContent =
+      `Template: ${cfg.templateOwner}/${cfg.templateRepo} @ ${cfg.branch} (固定) | ${authText}`;
   } catch (err) {
     el.templateInfo.textContent = 'Template: 載入失敗';
     appendLog(err instanceof Error ? err.message : String(err));
@@ -139,13 +141,13 @@ async function ensureFork() {
   requireFields({ ...cfg, script: '#!ipxe' }, false);
   saveConfig(cfg);
 
-  appendLog('確認使用者 fork repo...');
+  appendLog('檢查 fork repo 是否可被 GitHub App 存取...');
   const result = await apiRequest('/api/fork/ensure', {
     method: 'POST',
     body: JSON.stringify({}),
   });
 
-  appendLog(`Fork ready: ${result.owner}/${result.repo} (created=${result.created})`);
+  appendLog(`Repo ready: ${result.owner}/${result.repo} (created=${result.created})`);
 }
 
 async function dispatchBuild() {

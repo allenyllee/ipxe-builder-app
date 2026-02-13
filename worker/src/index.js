@@ -1,13 +1,13 @@
 const COOKIE_SESSION = 'ipxe_sess';
-const COOKIE_STATE = 'ipxe_oauth_state';
+const COOKIE_STATE = 'ipxe_install_state';
 const WORKFLOW_FILE = 'build-ipxe-efi.yml';
 const ARTIFACT_NAME = 'ipxe-efi';
 const GITHUB_USER_AGENT = 'ipxe-builder-worker';
 
 export default {
-  async fetch(request, env, ctx) {
+  async fetch(request, env) {
     try {
-      return await handleRequest(request, env, ctx);
+      return await handleRequest(request, env);
     } catch (err) {
       if (err instanceof Response) {
         return withCors(err, env, request);
@@ -35,7 +35,16 @@ async function handleRequest(request, env) {
 
   if (url.pathname === '/api/config' && request.method === 'GET') {
     assertFrontendOrigin(request, env);
-    return json(getTemplateConfig(env), {}, env, request);
+    return json(
+      {
+        ...getTemplateConfig(env),
+        auth_mode: 'github_app',
+        github_app_slug: must(env.GITHUB_APP_SLUG, 'missing GITHUB_APP_SLUG'),
+      },
+      {},
+      env,
+      request
+    );
   }
 
   if (url.pathname === '/api/auth/login' && request.method === 'GET') {
@@ -53,47 +62,59 @@ async function handleRequest(request, env) {
 
   if (url.pathname === '/api/me' && request.method === 'GET') {
     assertFrontendOrigin(request, env);
-    const token = await requireTokenFromSession(request, env);
-    const user = await githubRequest('https://api.github.com/user', token);
-    return json({ login: user.login, id: user.id }, {}, env, request);
+    const session = await requireSession(request, env);
+    return json(
+      {
+        login: session.account_login,
+        installation_id: session.installation_id,
+      },
+      {},
+      env,
+      request
+    );
   }
 
   if (url.pathname === '/api/fork/ensure' && request.method === 'POST') {
     assertFrontendOrigin(request, env);
-    const token = await requireTokenFromSession(request, env);
-    const result = await ensureFork(token, env);
+    const session = await requireSession(request, env);
+    const token = await getInstallationAccessToken(session.installation_id, env);
+    const result = await ensureRepoAccess(token, session.account_login, env);
     return json(result, {}, env, request);
   }
 
   if (url.pathname === '/api/build/start' && request.method === 'POST') {
     assertFrontendOrigin(request, env);
-    const token = await requireTokenFromSession(request, env);
+    const session = await requireSession(request, env);
+    const token = await getInstallationAccessToken(session.installation_id, env);
     const payload = await parseJson(request);
-    const result = await startBuild(token, payload, env);
+    const result = await startBuild(token, session.account_login, payload, env);
     return json(result, {}, env, request);
   }
 
   if (url.pathname === '/api/build/latest' && request.method === 'GET') {
     assertFrontendOrigin(request, env);
-    const token = await requireTokenFromSession(request, env);
-    const result = await latestRun(token, env);
+    const session = await requireSession(request, env);
+    const token = await getInstallationAccessToken(session.installation_id, env);
+    const result = await latestRun(token, session.account_login, env);
     return json(result, {}, env, request);
   }
 
   if (url.pathname === '/api/build/logs' && request.method === 'GET') {
     assertFrontendOrigin(request, env);
-    const token = await requireTokenFromSession(request, env);
+    const session = await requireSession(request, env);
+    const token = await getInstallationAccessToken(session.installation_id, env);
     const runId = Number(must(url.searchParams.get('run_id'), 'missing run_id'));
-    const result = await buildLogs(token, runId, env);
+    const result = await buildLogs(token, session.account_login, runId, env);
     return json(result, {}, env, request);
   }
 
   if (url.pathname === '/api/build/cleanup' && request.method === 'POST') {
     assertFrontendOrigin(request, env);
-    const token = await requireTokenFromSession(request, env);
+    const session = await requireSession(request, env);
+    const token = await getInstallationAccessToken(session.installation_id, env);
     const payload = await parseJson(request);
     const runId = Number(must(payload.run_id, 'missing run_id'));
-    const result = await cleanupArtifact(token, runId, env);
+    const result = await cleanupArtifact(token, session.account_login, runId, env);
     return json(result, {}, env, request);
   }
 
@@ -104,9 +125,11 @@ async function handleRequest(request, env) {
     } else {
       assertFrontendOriginOrRefererOrNone(request, env);
     }
-    const token = await requireTokenFromSession(request, env);
+
+    const session = await requireSession(request, env);
+    const token = await getInstallationAccessToken(session.installation_id, env);
     const runId = Number(must(url.searchParams.get('run_id'), 'missing run_id'));
-    return downloadArtifact(token, runId, cleanup, env, request);
+    return downloadArtifact(token, session.account_login, runId, cleanup, env, request);
   }
 
   return json({ error: 'Not found' }, { status: 404 }, env, request);
@@ -126,8 +149,6 @@ function assertFrontendOriginOrRefererOrNone(request, env) {
   const referer = request.headers.get('Referer') || '';
   if (!origin && referer.startsWith(env.FRONTEND_ORIGIN)) return;
 
-  // Some browsers may omit both Origin and Referer for top-level navigation
-  // to a download URL. For `cleanup=0` this endpoint is read-only.
   if (!origin && !referer) return;
 
   throw new Error('Origin not allowed');
@@ -272,12 +293,9 @@ function clearCookie(name) {
 
 async function authLogin(env) {
   const state = randomHex(20);
-  const redirectUri = `${env.APP_BASE_URL}/api/auth/callback`;
-  const authUrl = new URL('https://github.com/login/oauth/authorize');
-  authUrl.searchParams.set('client_id', env.GITHUB_CLIENT_ID);
-  authUrl.searchParams.set('redirect_uri', redirectUri);
-  authUrl.searchParams.set('state', state);
-  authUrl.searchParams.set('scope', 'repo workflow read:user');
+  const appSlug = must(env.GITHUB_APP_SLUG, 'missing GITHUB_APP_SLUG');
+  const installUrl = new URL(`https://github.com/apps/${appSlug}/installations/new`);
+  installUrl.searchParams.set('state', state);
 
   const signedState = await createSignedValue(env.SESSION_SECRET, {
     state,
@@ -285,47 +303,29 @@ async function authLogin(env) {
   });
 
   const headers = new Headers();
-  headers.set('Location', authUrl.toString());
+  headers.set('Location', installUrl.toString());
   headers.append('Set-Cookie', makeCookie(COOKIE_STATE, signedState, 600));
   return new Response(null, { status: 302, headers });
 }
 
 async function authCallback(request, env) {
   const url = new URL(request.url);
-  const code = must(url.searchParams.get('code'), 'missing oauth code');
-  const state = must(url.searchParams.get('state'), 'missing oauth state');
+  const installationId = Number(must(url.searchParams.get('installation_id'), 'missing installation_id'));
+  const state = must(url.searchParams.get('state'), 'missing install state');
 
   const cookies = getCookieMap(request);
   const rawState = cookies.get(COOKIE_STATE);
   const stateObj = await verifySignedValue(env.SESSION_SECRET, rawState);
   if (!stateObj || stateObj.state !== state || Number(stateObj.exp) < Date.now()) {
-    throw new Error('invalid oauth state');
+    throw new Error('invalid install state');
   }
 
-  const tokenRes = await fetch('https://github.com/login/oauth/access_token', {
-    method: 'POST',
-    headers: {
-      Accept: 'application/json',
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      client_id: env.GITHUB_CLIENT_ID,
-      client_secret: env.GITHUB_CLIENT_SECRET,
-      code,
-      redirect_uri: `${env.APP_BASE_URL}/api/auth/callback`,
-      state,
-    }),
-  });
-
-  if (!tokenRes.ok) {
-    throw new Error(`oauth exchange failed: ${tokenRes.status}`);
-  }
-
-  const tokenJson = await tokenRes.json();
-  const accessToken = must(tokenJson.access_token, 'failed to get access token');
+  const installation = await getInstallation(installationId, env);
+  const accountLogin = must(installation?.account?.login, 'missing installation account login');
 
   const session = await createSignedValue(env.SESSION_SECRET, {
-    token: accessToken,
+    installation_id: installationId,
+    account_login: accountLogin,
     exp: Date.now() + 7 * 24 * 60 * 60 * 1000,
   });
 
@@ -344,14 +344,14 @@ function logout(env, request) {
   return new Response(JSON.stringify({ ok: true }), { status: 200, headers });
 }
 
-async function requireTokenFromSession(request, env) {
+async function requireSession(request, env) {
   const cookies = getCookieMap(request);
   const raw = cookies.get(COOKIE_SESSION);
   const session = await verifySignedValue(env.SESSION_SECRET, raw);
-  if (!session || !session.token || Number(session.exp) < Date.now()) {
+  if (!session || !session.installation_id || !session.account_login || Number(session.exp) < Date.now()) {
     throw new Response('Unauthorized', { status: 401 });
   }
-  return session.token;
+  return session;
 }
 
 async function githubRequest(url, token, init = {}) {
@@ -378,18 +378,82 @@ async function githubRequest(url, token, init = {}) {
   return res;
 }
 
-async function getViewer(token) {
-  return githubRequest('https://api.github.com/user', token);
+function pemToArrayBuffer(pem) {
+  const clean = String(pem || '')
+    .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----/g, '')
+    .replace(/-----END [A-Z ]*PRIVATE KEY-----/g, '')
+    .replace(/[^A-Za-z0-9+/=]/g, '');
+  return base64ToBytes(clean).buffer;
 }
 
-async function ensureFork(token, env) {
-  const cfg = getTemplateConfig(env);
-  const templateOwner = cfg.templateOwner;
-  const templateRepo = cfg.templateRepo;
+function normalizePrivateKey(input) {
+  return String(input || '').replace(/\\n/g, '\n').trim();
+}
 
-  const viewer = await getViewer(token);
-  const repoUrl = `https://api.github.com/repos/${viewer.login}/${templateRepo}`;
-  const repoCheck = await fetch(repoUrl, {
+async function createAppJwt(env) {
+  const appId = must(env.GITHUB_APP_ID, 'missing GITHUB_APP_ID');
+  const privateKeyPem = normalizePrivateKey(must(env.GITHUB_APP_PRIVATE_KEY, 'missing GITHUB_APP_PRIVATE_KEY'));
+
+  const now = Math.floor(Date.now() / 1000);
+  const header = base64urlEncodeText(JSON.stringify({ alg: 'RS256', typ: 'JWT' }));
+  const payload = base64urlEncodeText(
+    JSON.stringify({
+      iat: now - 30,
+      exp: now + 540,
+      iss: String(appId),
+    })
+  );
+
+  const toSign = `${header}.${payload}`;
+  const key = await crypto.subtle.importKey(
+    'pkcs8',
+    pemToArrayBuffer(privateKeyPem),
+    { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+  const signature = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', key, utf8(toSign));
+  const sig = base64urlEncodeBytes(new Uint8Array(signature));
+
+  return `${toSign}.${sig}`;
+}
+
+async function appRequest(url, env, init = {}) {
+  const appJwt = await createAppJwt(env);
+  return githubRequest(url, appJwt, init);
+}
+
+async function getInstallation(installationId, env) {
+  return appRequest(`https://api.github.com/app/installations/${installationId}`, env);
+}
+
+async function getInstallationAccessToken(installationId, env) {
+  const appJwt = await createAppJwt(env);
+  const res = await fetch(`https://api.github.com/app/installations/${installationId}/access_tokens`, {
+    method: 'POST',
+    headers: {
+      Accept: 'application/vnd.github+json',
+      Authorization: `Bearer ${appJwt}`,
+      'X-GitHub-Api-Version': '2022-11-28',
+      'User-Agent': GITHUB_USER_AGENT,
+    },
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`GitHub App token exchange ${res.status}: ${text}`);
+  }
+
+  const jsonBody = await res.json();
+  return must(jsonBody.token, 'missing installation token');
+}
+
+async function ensureRepoAccess(token, owner, env) {
+  const cfg = getTemplateConfig(env);
+  const repo = cfg.templateRepo;
+  const repoUrl = `https://api.github.com/repos/${owner}/${repo}`;
+
+  const check = await fetch(repoUrl, {
     headers: {
       Accept: 'application/vnd.github+json',
       Authorization: `Bearer ${token}`,
@@ -397,48 +461,42 @@ async function ensureFork(token, env) {
       'User-Agent': GITHUB_USER_AGENT,
     },
   });
-  if (repoCheck.ok) {
-    return { owner: viewer.login, repo: templateRepo, created: false };
+
+  if (check.ok) {
+    return { owner, repo, created: false, note: 'repo accessible via GitHub App installation' };
   }
-  if (repoCheck.status === 404) {
-    await githubRequest(`https://api.github.com/repos/${templateOwner}/${templateRepo}/forks`, token, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ default_branch_only: true }),
-    });
-    return { owner: viewer.login, repo: templateRepo, created: true };
-  }
-  const text = await repoCheck.text();
-  throw new Error(`failed to check fork repo: ${repoCheck.status} ${text}`);
+
+  const text = await check.text();
+  throw new Error(
+    `repo not accessible for GitHub App installation (${check.status}). ` +
+      `Please fork ${cfg.templateOwner}/${cfg.templateRepo} to ${owner}/${repo} and install the GitHub App on that repo. ${text}`
+  );
 }
 
 function toBase64Unicode(input) {
   return bytesToBase64(utf8(input));
 }
 
-async function startBuild(token, payload, env) {
+async function startBuild(token, owner, payload, env) {
   const cfg = getTemplateConfig(env);
   const branch = cfg.branch;
+  const repo = cfg.templateRepo;
   const script = must(payload.script, 'missing script');
-  const rootCertPem =
-    typeof payload.root_cert_pem === 'string' ? payload.root_cert_pem.trim() : '';
+  const rootCertPem = typeof payload.root_cert_pem === 'string' ? payload.root_cert_pem.trim() : '';
   if (rootCertPem.length > 300000) {
     throw new Error('root certificate payload too large');
   }
 
-  const ensured = await ensureFork(token, env);
-  const inputs = {
-    script_b64: toBase64Unicode(script),
-  };
+  await ensureRepoAccess(token, owner, env);
+
+  const inputs = { script_b64: toBase64Unicode(script) };
   if (rootCertPem) {
     inputs.ca_cert_b64 = toBase64Unicode(`${rootCertPem}\n`);
   }
 
-  const dispatchUrl = `https://api.github.com/repos/${ensured.owner}/${ensured.repo}/actions/workflows/${WORKFLOW_FILE}/dispatches`;
-  const dispatchBody = JSON.stringify({
-    ref: branch,
-    inputs,
-  });
+  const dispatchUrl = `https://api.github.com/repos/${owner}/${repo}/actions/workflows/${WORKFLOW_FILE}/dispatches`;
+  const dispatchBody = JSON.stringify({ ref: branch, inputs });
+
   for (let i = 0; i < 3; i += 1) {
     try {
       await githubRequest(dispatchUrl, token, {
@@ -453,17 +511,16 @@ async function startBuild(token, payload, env) {
     }
   }
 
-  return { owner: ensured.owner, repo: ensured.repo, branch };
+  return { owner, repo, branch };
 }
 
-async function latestRun(token, env) {
+async function latestRun(token, owner, env) {
   const cfg = getTemplateConfig(env);
-  const templateRepo = cfg.templateRepo;
+  const repo = cfg.templateRepo;
   const branch = cfg.branch;
-  const viewer = await getViewer(token);
 
   const runs = await githubRequest(
-    `https://api.github.com/repos/${viewer.login}/${templateRepo}/actions/workflows/${WORKFLOW_FILE}/runs?branch=${encodeURIComponent(branch)}&event=workflow_dispatch&per_page=1`,
+    `https://api.github.com/repos/${owner}/${repo}/actions/workflows/${WORKFLOW_FILE}/runs?branch=${encodeURIComponent(branch)}&event=workflow_dispatch&per_page=1`,
     token
   );
 
@@ -473,15 +530,15 @@ async function latestRun(token, env) {
   let artifact = null;
   if (run.status === 'completed' && run.conclusion === 'success') {
     const artifacts = await githubRequest(
-      `https://api.github.com/repos/${viewer.login}/${templateRepo}/actions/runs/${run.id}/artifacts`,
+      `https://api.github.com/repos/${owner}/${repo}/actions/runs/${run.id}/artifacts`,
       token
     );
     artifact = artifacts?.artifacts?.find((a) => a.name === ARTIFACT_NAME) || null;
   }
 
   return {
-    owner: viewer.login,
-    repo: templateRepo,
+    owner,
+    repo,
     run: {
       id: run.id,
       run_number: run.run_number,
@@ -535,12 +592,11 @@ async function fetchJobLogTail(logsUrl, token) {
   return tailLines(text);
 }
 
-async function buildLogs(token, runId, env) {
+async function buildLogs(token, owner, runId, env) {
   const cfg = getTemplateConfig(env);
-  const templateRepo = cfg.templateRepo;
-  const viewer = await getViewer(token);
+  const repo = cfg.templateRepo;
   const jobs = await githubRequest(
-    `https://api.github.com/repos/${viewer.login}/${templateRepo}/actions/runs/${runId}/jobs?per_page=100`,
+    `https://api.github.com/repos/${owner}/${repo}/actions/runs/${runId}/jobs?per_page=100`,
     token
   );
 
@@ -566,20 +622,14 @@ async function buildLogs(token, runId, env) {
     });
   }
 
-  return {
-    run_id: runId,
-    owner: viewer.login,
-    repo: templateRepo,
-    logs,
-  };
+  return { run_id: runId, owner, repo, logs };
 }
 
-async function downloadArtifact(token, runId, cleanup, env, request) {
+async function downloadArtifact(token, owner, runId, cleanup, env, request) {
   const cfg = getTemplateConfig(env);
-  const templateRepo = cfg.templateRepo;
-  const viewer = await getViewer(token);
+  const repo = cfg.templateRepo;
   const artifacts = await githubRequest(
-    `https://api.github.com/repos/${viewer.login}/${templateRepo}/actions/runs/${runId}/artifacts`,
+    `https://api.github.com/repos/${owner}/${repo}/actions/runs/${runId}/artifacts`,
     token
   );
 
@@ -588,9 +638,6 @@ async function downloadArtifact(token, runId, cleanup, env, request) {
     throw new Error('artifact not found');
   }
 
-  // GitHub artifact download URL usually redirects to a signed storage URL.
-  // Follow redirect manually and avoid forwarding GitHub Authorization header
-  // to the storage host, otherwise some providers reject it as malformed auth.
   const ghZipRes = await fetch(artifact.archive_download_url, {
     method: 'GET',
     redirect: 'manual',
@@ -615,13 +662,14 @@ async function downloadArtifact(token, runId, cleanup, env, request) {
     const text = await zipRes.text();
     throw new Error(`artifact download failed ${zipRes.status}: ${text}`);
   }
+
   const headers = new Headers(corsHeaders(env, request));
   headers.set('Content-Type', 'application/zip');
   headers.set('Content-Disposition', `attachment; filename="ipxe-efi-run-${runId}.zip"`);
 
   if (cleanup) {
     await githubRequest(
-      `https://api.github.com/repos/${viewer.login}/${templateRepo}/actions/artifacts/${artifact.id}`,
+      `https://api.github.com/repos/${owner}/${repo}/actions/artifacts/${artifact.id}`,
       token,
       { method: 'DELETE' }
     );
@@ -630,13 +678,12 @@ async function downloadArtifact(token, runId, cleanup, env, request) {
   return new Response(zipRes.body, { status: 200, headers });
 }
 
-async function cleanupArtifact(token, runId, env) {
+async function cleanupArtifact(token, owner, runId, env) {
   const cfg = getTemplateConfig(env);
-  const templateRepo = cfg.templateRepo;
-  const viewer = await getViewer(token);
+  const repo = cfg.templateRepo;
 
   const artifacts = await githubRequest(
-    `https://api.github.com/repos/${viewer.login}/${templateRepo}/actions/runs/${runId}/artifacts`,
+    `https://api.github.com/repos/${owner}/${repo}/actions/runs/${runId}/artifacts`,
     token
   );
   const artifact = artifacts?.artifacts?.find((a) => a.name === ARTIFACT_NAME);
@@ -645,7 +692,7 @@ async function cleanupArtifact(token, runId, env) {
   }
 
   await githubRequest(
-    `https://api.github.com/repos/${viewer.login}/${templateRepo}/actions/artifacts/${artifact.id}`,
+    `https://api.github.com/repos/${owner}/${repo}/actions/artifacts/${artifact.id}`,
     token,
     { method: 'DELETE' }
   );

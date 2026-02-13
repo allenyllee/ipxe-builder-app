@@ -10,8 +10,8 @@
     <main class="container">
       <h1>iPXE EFI Builder</h1>
       <p>
-        GitHub Pages 前端 + Cloudflare Worker + GitHub Login。使用者在自己的 fork repo
-        觸發 build，成功後自動下載並刪除 artifact。
+        GitHub Pages 前端 + Cloudflare Worker + GitHub App。使用者在自己的 fork repo
+        觸發 build，成功後自動下載，並保留一段時間供手動重抓後再清理 artifact。
       </p>
 
       <section class="card">
@@ -19,7 +19,7 @@
         <input id="apiBase" type="text" placeholder="https://ipxe-builder-api.<subdomain>.workers.dev" />
 
         <div class="actions">
-          <button id="loginBtn">GitHub Login</button>
+          <button id="loginBtn">GitHub App Login/Install</button>
           <button id="logoutBtn" class="secondary">Logout</button>
         </div>
 
@@ -38,7 +38,7 @@ chain http://boot.ipxe.org/demo/boot.php
         <div id="rootCertInfo" class="status">未上傳 Root CA，將使用系統預設信任。</div>
 
         <div class="actions">
-          <button id="forkBtn" class="secondary">Ensure Fork</button>
+          <button id="forkBtn" class="secondary">Check Fork Access</button>
           <button id="buildBtn">Build + Auto Download</button>
           <button id="checkBtn" class="secondary">Check Latest Run</button>
           <button id="cleanupBtn" class="secondary">Clean Now</button>

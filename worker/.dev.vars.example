@@ -1,5 +1,9 @@
 # Local-only secrets for `wrangler dev`
 # Copy to `.dev.vars` and fill real values.
+#
+# GITHUB_APP_PRIVATE_KEY can be:
+# 1) raw multiline PEM, or
+# 2) a single line with '\n' escapes.
 
-GITHUB_CLIENT_SECRET=your_github_oauth_client_secret
+GITHUB_APP_PRIVATE_KEY=-----BEGIN PRIVATE KEY-----\nREPLACE_ME\n-----END PRIVATE KEY-----
 SESSION_SECRET=replace_with_a_long_random_secret_string
