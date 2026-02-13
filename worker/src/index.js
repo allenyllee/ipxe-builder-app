@@ -395,7 +395,7 @@ async function startBuild(token, payload, env) {
   const script = must(payload.script, 'missing script');
   const rootCertPem =
     typeof payload.root_cert_pem === 'string' ? payload.root_cert_pem.trim() : '';
-  if (rootCertPem.length > 120000) {
+  if (rootCertPem.length > 300000) {
     throw new Error('root certificate payload too large');
   }
 

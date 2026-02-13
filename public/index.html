@@ -33,8 +33,8 @@ dhcp
 chain http://boot.ipxe.org/demo/boot.php
 </textarea>
 
-        <label for="rootCertFile">Optional Root CA Certificate (PEM)</label>
-        <input id="rootCertFile" type="file" accept=".crt,.pem,.cer,text/plain" />
+        <label for="rootCertFile">Optional Root CA Certificates (PEM, multiple)</label>
+        <input id="rootCertFile" type="file" accept=".crt,.pem,.cer,text/plain" multiple />
         <div id="rootCertInfo" class="status">未上傳 Root CA，將使用系統預設信任。</div>
 
         <div class="actions">

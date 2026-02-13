@@ -15,6 +15,7 @@ const el = {
 
 const STORAGE_KEY = 'ipxe-builder-config-v3';
 let rootCertPem = '';
+let rootCertFileCount = 0;
 
 function appendLog(msg) {
   const ts = new Date().toISOString().replace('T', ' ').replace('Z', '');
@@ -170,29 +171,37 @@ function updateRootCertInfo() {
     return;
   }
   const lineCount = rootCertPem.split(/\r?\n/).length;
-  el.rootCertInfo.textContent = `已載入 Root CA（${lineCount} lines）。`;
+  el.rootCertInfo.textContent = `已載入 ${rootCertFileCount} 份 Root CA（${lineCount} lines）。`;
 }
 
-async function handleRootCertUpload(file) {
-  if (!file) {
+async function handleRootCertUpload(files) {
+  if (!files || files.length === 0) {
     rootCertPem = '';
+    rootCertFileCount = 0;
     updateRootCertInfo();
     return;
   }
 
-  const text = await file.text();
-  const pem = text.trim();
-  if (!pem) {
-    throw new Error('憑證檔案為空。');
-  }
-  if (!pem.includes('BEGIN CERTIFICATE') || !pem.includes('END CERTIFICATE')) {
-    throw new Error('請上傳 PEM 格式憑證（需包含 BEGIN/END CERTIFICATE）。');
-  }
-  if (pem.length > 120000) {
-    throw new Error('憑證內容過大，請確認是否為單一 root CA 憑證。');
+  const parts = [];
+  for (const file of files) {
+    const text = await file.text();
+    const pem = text.trim();
+    if (!pem) {
+      throw new Error(`憑證檔案為空：${file.name}`);
+    }
+    if (!pem.includes('BEGIN CERTIFICATE') || !pem.includes('END CERTIFICATE')) {
+      throw new Error(`請上傳 PEM 格式憑證（${file.name} 缺少 BEGIN/END CERTIFICATE）。`);
+    }
+    parts.push(`${pem}\n`);
   }
 
-  rootCertPem = `${pem}\n`;
+  const merged = parts.join('');
+  if (merged.length > 300000) {
+    throw new Error('憑證總內容過大，請精簡為必要的 root CA。');
+  }
+
+  rootCertPem = merged;
+  rootCertFileCount = files.length;
   updateRootCertInfo();
 }
 
@@ -352,16 +361,17 @@ el.checkBtn.addEventListener('click', async () => {
 
 el.rootCertFile.addEventListener('change', async (ev) => {
   const target = ev.target;
-  const file = target?.files?.[0];
+  const files = target?.files ? Array.from(target.files) : [];
   try {
-    await handleRootCertUpload(file);
-    if (file) {
-      appendLog(`Root CA 載入成功: ${file.name}`);
+    await handleRootCertUpload(files);
+    if (files.length > 0) {
+      appendLog(`Root CA 載入成功: ${files.map((f) => f.name).join(', ')}`);
     } else {
       appendLog('已清除 Root CA。');
     }
   } catch (err) {
     rootCertPem = '';
+    rootCertFileCount = 0;
     updateRootCertInfo();
     appendLog(err instanceof Error ? err.message : String(err));
   }

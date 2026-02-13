@@ -12,7 +12,7 @@
 1. 使用者在前端按 `GitHub Login`。
 2. Worker 完成 OAuth，建立 session cookie。
 3. 前端呼叫 `Ensure Fork`，Worker 確認使用者是否已有固定模板 repo 的 fork。
-4. 前端可選上傳 Root CA（PEM），再呼叫 `Build + Auto Download`，Worker 對使用者 fork repo 觸發 `build-ipxe-efi.yml`。
+4. 前端可選上傳多個 Root CA（PEM），再呼叫 `Build + Auto Download`，Worker 對使用者 fork repo 觸發 `build-ipxe-efi.yml`。
 5. 前端輪詢最新 run，成功後呼叫 Worker 下載 artifact。
 6. Worker 串流 zip 給前端，並刪除 artifact（`cleanup=1`）。
 
