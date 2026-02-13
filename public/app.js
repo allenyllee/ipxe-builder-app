@@ -320,7 +320,7 @@ async function runSetupWizard() {
               await loadOauthInstallations();
             },
           },
-          { label: '前往 GitHub App Install', href: installUrl, sameTab: true },
+          { label: '前往 GitHub App Install', href: installUrl },
         ];
         for (const inst of oauthInstallations) {
           actions.push({
@@ -354,7 +354,7 @@ async function runSetupWizard() {
 
       setOverlay('Step 3/4: 已偵測到你有 fork，請安裝 GitHub App 到該 fork（安裝後自動回來）。', [
         ...(getForkUrl() ? [{ label: '重新 Fork 到其他組織', href: getForkUrl(), secondary: true }] : []),
-        { label: '前往 GitHub App Install', href: installUrl, sameTab: true },
+        { label: '前往 GitHub App Install', href: installUrl },
         {
           type: 'button',
           label: '已安裝但沒回來？快速恢復登入',
@@ -561,7 +561,7 @@ async function openSwitchInstallationOverlay() {
 
   if (oauthInstallations.length === 0) {
     setOverlay('目前查無可切換的 installations。可先安裝 App 或重新 OAuth 登入。', [
-      { label: '前往 GitHub App Install', href: getInstallUrl(), sameTab: true },
+      { label: '前往 GitHub App Install', href: getInstallUrl() },
       { label: 'OAuth 使用者登入', href: getOAuthLoginUrl(), sameTab: true, secondary: true },
     ]);
     return;
