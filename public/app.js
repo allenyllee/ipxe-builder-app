@@ -7,15 +7,19 @@ const el = {
   script: document.getElementById('script'),
   rootCertFile: document.getElementById('rootCertFile'),
   rootCertInfo: document.getElementById('rootCertInfo'),
+  downloadInfo: document.getElementById('downloadInfo'),
   forkBtn: document.getElementById('forkBtn'),
   buildBtn: document.getElementById('buildBtn'),
   checkBtn: document.getElementById('checkBtn'),
+  cleanupBtn: document.getElementById('cleanupBtn'),
   log: document.getElementById('log'),
 };
 
 const STORAGE_KEY = 'ipxe-builder-config-v3';
 let rootCertPem = '';
 let rootCertFileCount = 0;
+let cleanupTimer = null;
+let lastArtifactRunId = null;
 
 function appendLog(msg) {
   const ts = new Date().toISOString().replace('T', ' ').replace('Z', '');
@@ -159,10 +163,83 @@ async function dispatchBuild() {
   });
 
   appendLog(`Workflow dispatched to ${result.owner}/${result.repo}@${result.branch}`);
+  el.downloadInfo.textContent = '尚無下載連結。';
   if (cfg.rootCertPem) {
     appendLog('已帶入使用者上傳的 Root CA 憑證。');
   }
   appendLog('等待約 20-60 秒，系統會自動輪詢並嘗試下載。');
+}
+
+function buildManualDownloadUrl(runId) {
+  const q = new URLSearchParams({
+    run_id: String(runId),
+    cleanup: '0',
+  });
+  return `${apiBase()}/api/build/download?${q.toString()}`;
+}
+
+function showDownloadLink(runId) {
+  lastArtifactRunId = runId;
+  const url = buildManualDownloadUrl(runId);
+  el.downloadInfo.innerHTML = '';
+  const a = document.createElement('a');
+  a.href = url;
+  a.textContent = `手動下載連結（Run #${runId}）`;
+  a.target = '_blank';
+  a.rel = 'noopener noreferrer';
+  el.downloadInfo.appendChild(a);
+}
+
+function scheduleCleanup(runId, delayMs = 10 * 60 * 1000) {
+  if (cleanupTimer) clearTimeout(cleanupTimer);
+  appendLog('已排程 10 分鐘後自動清除 artifact。');
+  cleanupTimer = setTimeout(async () => {
+    try {
+      const res = await apiRequest('/api/build/cleanup', {
+        method: 'POST',
+        body: JSON.stringify({ run_id: runId }),
+      });
+      if (res.deleted) {
+        appendLog('artifact 已清除。');
+      } else {
+        appendLog('artifact 已不存在，略過清除。');
+      }
+      el.downloadInfo.textContent = '下載連結已過期（artifact 已清除）。';
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      appendLog(`artifact 清除失敗：${msg}`);
+      if (msg.includes('403')) {
+        appendLog('請確認 fork repo 的 Workflow permissions 為 Read and write。');
+      }
+    } finally {
+      cleanupTimer = null;
+    }
+  }, delayMs);
+}
+
+async function cleanupNow() {
+  if (!lastArtifactRunId) {
+    appendLog('尚無可清除的 artifact。請先完成一次 build。');
+    return;
+  }
+  try {
+    const res = await apiRequest('/api/build/cleanup', {
+      method: 'POST',
+      body: JSON.stringify({ run_id: lastArtifactRunId }),
+    });
+    if (res.deleted) {
+      appendLog('手動清除成功：artifact 已刪除。');
+      el.downloadInfo.textContent = '下載連結已過期（artifact 已清除）。';
+    } else {
+      appendLog('手動清除：artifact 已不存在。');
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    appendLog(`手動清除失敗：${msg}`);
+    if (msg.includes('403')) {
+      appendLog('請確認 fork repo 的 Workflow permissions 為 Read and write。');
+    }
+  }
 }
 
 function updateRootCertInfo() {
@@ -216,8 +293,15 @@ async function checkLatestRun() {
   appendLog(`Run URL: ${run.html_url}`);
 
   if (run.status === 'completed' && run.conclusion === 'success' && data.artifact?.id) {
+    showDownloadLink(run.id);
     appendLog('偵測到成功 artifact，開始自動下載...');
-    await downloadArtifact(run.id, true);
+    await downloadArtifact(run.id, false);
+    scheduleCleanup(run.id);
+    return;
+  }
+
+  if (run.status === 'completed' && run.conclusion === 'success' && !data.artifact?.id) {
+    appendLog('Run 已成功，但找不到 artifact。可能已被清除，請重新 Build 產生新檔案。');
     return;
   }
 
@@ -268,7 +352,11 @@ async function downloadArtifact(runId, cleanup = true) {
   a.remove();
   URL.revokeObjectURL(url);
 
-  appendLog('下載已觸發。artifact 已由後端清除。');
+  if (cleanup) {
+    appendLog('下載已觸發。artifact 已由後端清除。');
+  } else {
+    appendLog('下載已觸發。artifact 尚未清除（保留手動下載與延遲清理）。');
+  }
 }
 
 async function pollUntilDone(maxAttempts = 15, intervalMs = 5000) {
@@ -283,7 +371,11 @@ async function pollUntilDone(maxAttempts = 15, intervalMs = 5000) {
 
       if (run.status === 'completed') {
         if (run.conclusion === 'success' && data.artifact?.id) {
-          await downloadArtifact(run.id, true);
+          showDownloadLink(run.id);
+          await downloadArtifact(run.id, false);
+          scheduleCleanup(run.id);
+        } else if (run.conclusion === 'success' && !data.artifact?.id) {
+          appendLog('Run 已成功，但找不到 artifact。可能已被清除，請重新 Build 產生新檔案。');
         } else {
           appendLog('Run 已完成但非 success，請開 Run URL 查看詳細錯誤。');
           appendLog('正在抓取失敗 log...');
@@ -356,6 +448,15 @@ el.checkBtn.addEventListener('click', async () => {
     appendLog(err instanceof Error ? err.message : String(err));
   } finally {
     el.checkBtn.disabled = false;
+  }
+});
+
+el.cleanupBtn.addEventListener('click', async () => {
+  el.cleanupBtn.disabled = true;
+  try {
+    await cleanupNow();
+  } finally {
+    el.cleanupBtn.disabled = false;
   }
 });
 

@@ -88,11 +88,24 @@ async function handleRequest(request, env) {
     return json(result, {}, env, request);
   }
 
-  if (url.pathname === '/api/build/download' && request.method === 'GET') {
+  if (url.pathname === '/api/build/cleanup' && request.method === 'POST') {
     assertFrontendOrigin(request, env);
     const token = await requireTokenFromSession(request, env);
-    const runId = Number(must(url.searchParams.get('run_id'), 'missing run_id'));
+    const payload = await parseJson(request);
+    const runId = Number(must(payload.run_id, 'missing run_id'));
+    const result = await cleanupArtifact(token, runId, env);
+    return json(result, {}, env, request);
+  }
+
+  if (url.pathname === '/api/build/download' && request.method === 'GET') {
     const cleanup = url.searchParams.get('cleanup') === '1';
+    if (cleanup) {
+      assertFrontendOrigin(request, env);
+    } else {
+      assertFrontendOriginOrRefererOrNone(request, env);
+    }
+    const token = await requireTokenFromSession(request, env);
+    const runId = Number(must(url.searchParams.get('run_id'), 'missing run_id'));
     return downloadArtifact(token, runId, cleanup, env, request);
   }
 
@@ -104,6 +117,20 @@ function assertFrontendOrigin(request, env) {
   if (!origin || origin !== env.FRONTEND_ORIGIN) {
     throw new Error('Origin not allowed');
   }
+}
+
+function assertFrontendOriginOrRefererOrNone(request, env) {
+  const origin = request.headers.get('Origin');
+  if (origin === env.FRONTEND_ORIGIN) return;
+
+  const referer = request.headers.get('Referer') || '';
+  if (!origin && referer.startsWith(env.FRONTEND_ORIGIN)) return;
+
+  // Some browsers may omit both Origin and Referer for top-level navigation
+  // to a download URL. For `cleanup=0` this endpoint is read-only.
+  if (!origin && !referer) return;
+
+  throw new Error('Origin not allowed');
 }
 
 function corsHeaders(env, request) {
@@ -601,4 +628,26 @@ async function downloadArtifact(token, runId, cleanup, env, request) {
   }
 
   return new Response(zipRes.body, { status: 200, headers });
+}
+
+async function cleanupArtifact(token, runId, env) {
+  const cfg = getTemplateConfig(env);
+  const templateRepo = cfg.templateRepo;
+  const viewer = await getViewer(token);
+
+  const artifacts = await githubRequest(
+    `https://api.github.com/repos/${viewer.login}/${templateRepo}/actions/runs/${runId}/artifacts`,
+    token
+  );
+  const artifact = artifacts?.artifacts?.find((a) => a.name === ARTIFACT_NAME);
+  if (!artifact) {
+    return { deleted: false };
+  }
+
+  await githubRequest(
+    `https://api.github.com/repos/${viewer.login}/${templateRepo}/actions/artifacts/${artifact.id}`,
+    token,
+    { method: 'DELETE' }
+  );
+  return { deleted: true };
 }
